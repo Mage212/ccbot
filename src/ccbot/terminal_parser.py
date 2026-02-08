@@ -62,7 +62,13 @@ UI_PATTERNS: list[UIPattern] = [
     ),
     UIPattern(
         name="AskUserQuestion",
-        top=(re.compile(r"^\s*☐"),),
+        top=(re.compile(r"^\s*←\s+[☐✔]"),),   # Multi-tab: no bottom needed
+        bottom=(),
+        min_gap=1,
+    ),
+    UIPattern(
+        name="AskUserQuestion",
+        top=(re.compile(r"^\s*[☐✔]"),),        # Single-tab: bottom required
         bottom=(re.compile(r"^\s*Enter to select"),),
         min_gap=1,
     ),
@@ -96,7 +102,12 @@ def _shorten_separators(text: str) -> str:
 
 
 def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent | None:
-    """Try to extract content matching a single UI pattern."""
+    """Try to extract content matching a single UI pattern.
+
+    When ``pattern.bottom`` is empty, the region extends from the top marker
+    to the last non-empty line (used for multi-tab AskUserQuestion where the
+    bottom delimiter varies by tab).
+    """
     top_idx: int | None = None
     bottom_idx: int | None = None
 
@@ -104,14 +115,24 @@ def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent |
         if top_idx is None:
             if any(p.search(line) for p in pattern.top):
                 top_idx = i
-        elif any(p.search(line) for p in pattern.bottom):
+        elif pattern.bottom and any(p.search(line) for p in pattern.bottom):
             bottom_idx = i
             break
 
-    if top_idx is None or bottom_idx is None or bottom_idx - top_idx < pattern.min_gap:
+    if top_idx is None:
         return None
 
-    content = "\n".join(lines[top_idx : bottom_idx + 1])
+    # No bottom patterns → use last non-empty line as boundary
+    if not pattern.bottom:
+        for i in range(len(lines) - 1, top_idx, -1):
+            if lines[i].strip():
+                bottom_idx = i
+                break
+
+    if bottom_idx is None or bottom_idx - top_idx < pattern.min_gap:
+        return None
+
+    content = "\n".join(lines[top_idx : bottom_idx + 1]).rstrip()
     return InteractiveUIContent(content=_shorten_separators(content), name=pattern.name)
 
 
