@@ -27,6 +27,8 @@ from .callback_data import (
     CB_ASK_LEFT,
     CB_ASK_REFRESH,
     CB_ASK_RIGHT,
+    CB_ASK_SPACE,
+    CB_ASK_TAB,
     CB_ASK_UP,
 )
 from .message_sender import NO_LINK_PREVIEW, rate_limit_send_message
@@ -80,7 +82,9 @@ def _build_interactive_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     # Row 1: directional keys
     rows.append([
+        InlineKeyboardButton("␣ Space", callback_data=f"{CB_ASK_SPACE}{window_name}"[:64]),
         InlineKeyboardButton("↑", callback_data=f"{CB_ASK_UP}{window_name}"[:64]),
+        InlineKeyboardButton("⇥ Tab", callback_data=f"{CB_ASK_TAB}{window_name}"[:64]),
     ])
     if vertical_only:
         rows.append([

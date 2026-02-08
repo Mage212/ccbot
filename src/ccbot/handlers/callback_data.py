@@ -31,5 +31,7 @@ CB_ASK_LEFT = "aq:left:"   # aq:left:<window>
 CB_ASK_RIGHT = "aq:right:" # aq:right:<window>
 CB_ASK_ESC = "aq:esc:"     # aq:esc:<window>
 CB_ASK_ENTER = "aq:enter:" # aq:enter:<window>
+CB_ASK_SPACE = "aq:spc:"   # aq:spc:<window>
+CB_ASK_TAB = "aq:tab:"     # aq:tab:<window>
 CB_ASK_REFRESH = "aq:ref:" # aq:ref:<window>
 

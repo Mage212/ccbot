@@ -82,6 +82,14 @@ UI_PATTERNS: list[UIPattern] = [
         top=(re.compile(r"^\s*Restore the code"),),
         bottom=(re.compile(r"^\s*Enter to continue"),),
     ),
+    UIPattern(
+        name="Settings",
+        top=(re.compile(r"^\s*Settings:.*tab to cycle"),),
+        bottom=(
+            re.compile(r"Esc to cancel"),
+            re.compile(r"^\s*Type to filter"),
+        ),
+    ),
 ]
 
 

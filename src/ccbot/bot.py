@@ -59,6 +59,8 @@ from .handlers.callback_data import (
     CB_ASK_LEFT,
     CB_ASK_REFRESH,
     CB_ASK_RIGHT,
+    CB_ASK_SPACE,
+    CB_ASK_TAB,
     CB_ASK_UP,
     CB_DIR_CANCEL,
     CB_DIR_CONFIRM,
@@ -682,6 +684,28 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await asyncio.sleep(0.15)
             await handle_interactive_ui(context.bot, user.id, window_name, thread_id)
         await query.answer("⏎ Enter")
+
+    # Interactive UI: Space
+    elif data.startswith(CB_ASK_SPACE):
+        window_name = data[len(CB_ASK_SPACE):]
+        thread_id = _get_thread_id(update)
+        w = await tmux_manager.find_window_by_name(window_name)
+        if w:
+            await tmux_manager.send_keys(w.window_id, "Space", enter=False, literal=False)
+            await asyncio.sleep(0.15)
+            await handle_interactive_ui(context.bot, user.id, window_name, thread_id)
+        await query.answer("␣ Space")
+
+    # Interactive UI: Tab
+    elif data.startswith(CB_ASK_TAB):
+        window_name = data[len(CB_ASK_TAB):]
+        thread_id = _get_thread_id(update)
+        w = await tmux_manager.find_window_by_name(window_name)
+        if w:
+            await tmux_manager.send_keys(w.window_id, "Tab", enter=False, literal=False)
+            await asyncio.sleep(0.15)
+            await handle_interactive_ui(context.bot, user.id, window_name, thread_id)
+        await query.answer("⇥ Tab")
 
     # Interactive UI: refresh display
     elif data.startswith(CB_ASK_REFRESH):
