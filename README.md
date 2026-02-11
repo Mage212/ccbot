@@ -226,8 +226,8 @@ The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_N
 
 | Path                            | Description                                                             |
 | ------------------------------- | ----------------------------------------------------------------------- |
-| `$CCBOT_DIR/state.json`         | Thread bindings, window states, and per-user read offsets               |
-| `$CCBOT_DIR/session_map.json`   | Hook-generated `{tmux_session:window_name: {session_id, cwd}}` mappings |
+| `$CCBOT_DIR/state.json`         | Thread bindings, window states, display names, and per-user read offsets |
+| `$CCBOT_DIR/session_map.json`   | Hook-generated `{tmux_session:window_id: {session_id, cwd, window_name}}` mappings |
 | `$CCBOT_DIR/monitor_state.json` | Monitor byte offsets per session (prevents duplicate notifications)     |
 | `~/.claude/projects/`           | Claude Code session data (read-only)                                    |
 

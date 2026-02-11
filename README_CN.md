@@ -222,8 +222,8 @@ claude
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│  Topic ID   │ ───▶ │ Window Name │ ───▶ │ Session ID  │
-│  (Telegram) │      │   (tmux)    │      │  (Claude)   │
+│  Topic ID   │ ───▶ │ Window ID   │ ───▶ │ Session ID  │
+│  (Telegram) │      │ (tmux @id)  │      │  (Claude)   │
 └─────────────┘      └─────────────┘      └─────────────┘
      thread_bindings      session_map.json
      (state.json)         (由 hook 写入)
@@ -231,7 +231,7 @@ claude
 
 **核心设计思路：**
 - **话题为中心** — 每个 Telegram 话题绑定一个 tmux 窗口，话题就是会话列表
-- **窗口为中心** — 所有状态以 tmux 窗口名称为锚点（如 `myproject`），同一目录可有多个窗口（自动后缀：`myproject-2`）
+- **窗口 ID 为中心** — 所有内部状态以 tmux 窗口 ID（如 `@0`、`@12`）为键，而非窗口名称。窗口名称仅作为显示名称保留。同一目录可有多个窗口
 - **基于 Hook 的会话追踪** — Claude Code 的 `SessionStart` Hook 写入 `session_map.json`；监控器每次轮询读取它以自动检测会话变化
 - **工具调用配对** — `tool_use_id` 跨轮询周期追踪；工具结果直接编辑原始的工具调用 Telegram 消息
 - **MarkdownV2 + 降级** — 所有消息通过 `telegramify-markdown` 转换，解析失败时降级为纯文本
@@ -241,8 +241,8 @@ claude
 
 | 路径 | 说明 |
 |---|---|
-| `$CCBOT_DIR/state.json` | 话题绑定、窗口状态、每用户读取偏移量 |
-| `$CCBOT_DIR/session_map.json` | Hook 生成的 `{tmux_session:window_name: {session_id, cwd}}` 映射 |
+| `$CCBOT_DIR/state.json` | 话题绑定、窗口状态、显示名称、每用户读取偏移量 |
+| `$CCBOT_DIR/session_map.json` | Hook 生成的 `{tmux_session:window_id: {session_id, cwd, window_name}}` 映射 |
 | `$CCBOT_DIR/monitor_state.json` | 每会话的监控字节偏移量（防止重复通知） |
 | `~/.claude/projects/` | Claude Code 会话数据（只读） |
 
