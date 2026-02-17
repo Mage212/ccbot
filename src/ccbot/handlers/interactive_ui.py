@@ -32,7 +32,7 @@ from .callback_data import (
     CB_ASK_TAB,
     CB_ASK_UP,
 )
-from .message_sender import NO_LINK_PREVIEW, rate_limit_send_message
+from .message_sender import NO_LINK_PREVIEW, send_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +210,7 @@ async def handle_interactive_ui(
     logger.info(
         "Sending interactive UI to user %d for window_id %s", user_id, window_id
     )
-    sent = await rate_limit_send_message(
+    sent = await send_with_fallback(
         bot,
         chat_id,
         text,

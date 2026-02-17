@@ -43,6 +43,7 @@ from telegram import (
 )
 from telegram.constants import ChatAction
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     CallbackQueryHandler,
     CommandHandler,
@@ -107,10 +108,10 @@ from .handlers.message_queue import (
 )
 from .handlers.message_sender import (
     NO_LINK_PREVIEW,
-    rate_limit_send_message,
     safe_edit,
     safe_reply,
     safe_send,
+    send_with_fallback,
 )
 from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts
@@ -467,7 +468,7 @@ async def _capture_bash_output(
 
             if msg_id is None:
                 # First capture — send a new message
-                sent = await rate_limit_send_message(
+                sent = await send_with_fallback(
                     bot,
                     chat_id,
                     output,
@@ -1379,6 +1380,7 @@ def create_bot() -> Application:
     application = (
         Application.builder()
         .token(config.telegram_bot_token)
+        .rate_limiter(AIORateLimiter())
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()

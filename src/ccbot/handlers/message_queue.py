@@ -4,9 +4,10 @@ Provides a queue-based message processing system that ensures:
   - Messages are sent in receive order (FIFO)
   - Status messages always follow content messages
   - Consecutive content messages can be merged for efficiency
-  - Rate limiting is respected
   - Thread-aware sending: each MessageTask carries an optional thread_id
     for Telegram topic support
+
+Rate limiting is handled globally by AIORateLimiter on the Application.
 
 Key components:
   - MessageTask: Dataclass representing a queued message task (with thread_id)
@@ -18,17 +19,19 @@ Key components:
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
 from telegram import Bot
+from telegram.constants import ChatAction
 from telegram.error import RetryAfter
 
 from ..markdown_v2 import convert_markdown
 from ..session import session_manager
 from ..terminal_parser import parse_status_line
 from ..tmux_manager import tmux_manager
-from .message_sender import NO_LINK_PREVIEW, rate_limit_send_message
+from .message_sender import NO_LINK_PREVIEW, send_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,12 @@ _tool_msg_ids: dict[tuple[str, int, int], int] = {}
 
 # Status message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+
+# Flood control: user_id -> monotonic time when ban expires
+_flood_until: dict[int, float] = {}
+
+# Max seconds to wait for flood control before dropping tasks
+FLOOD_CONTROL_MAX_WAIT = 10
 
 
 def get_message_queue(user_id: int) -> asyncio.Queue[MessageTask] | None:
@@ -185,6 +194,25 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
         try:
             task = await queue.get()
             try:
+                # Flood control: drop status, wait for content
+                flood_end = _flood_until.get(user_id, 0)
+                if flood_end > 0:
+                    remaining = flood_end - time.monotonic()
+                    if remaining > 0:
+                        if task.task_type != "content":
+                            # Status is ephemeral — safe to drop
+                            continue
+                        # Content is actual Claude output — wait then send
+                        logger.debug(
+                            "Flood controlled: waiting %.0fs for content (user %d)",
+                            remaining,
+                            user_id,
+                        )
+                        await asyncio.sleep(remaining)
+                    # Ban expired
+                    _flood_until.pop(user_id, None)
+                    logger.info("Flood control lifted for user %d", user_id)
+
                 if task.task_type == "content":
                     # Try to merge consecutive content tasks
                     merged_task, merge_count = await _merge_content_tasks(
@@ -206,20 +234,21 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     if isinstance(e.retry_after, int)
                     else int(e.retry_after.total_seconds())
                 )
-                logger.warning(
-                    f"Flood control for user {user_id}, pausing {retry_secs}s"
-                )
-                # Log periodically during long waits
-                remaining = retry_secs
-                while remaining > 0:
-                    chunk = min(remaining, 30)
-                    await asyncio.sleep(chunk)
-                    remaining -= chunk
-                    if remaining > 0:
-                        logger.warning(
-                            f"Flood control for user {user_id}, "
-                            f"{remaining}s remaining"
-                        )
+                if retry_secs > FLOOD_CONTROL_MAX_WAIT:
+                    _flood_until[user_id] = time.monotonic() + retry_secs
+                    logger.warning(
+                        "Flood control for user %d: retry_after=%ds, "
+                        "pausing queue until ban expires",
+                        user_id,
+                        retry_secs,
+                    )
+                else:
+                    logger.warning(
+                        "Flood control for user %d: waiting %ds",
+                        user_id,
+                        retry_secs,
+                    )
+                    await asyncio.sleep(retry_secs)
             except Exception as e:
                 logger.error(f"Error processing message task for user {user_id}: {e}")
             finally:
@@ -303,7 +332,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 last_msg_id = converted_msg_id
                 continue
 
-        sent = await rate_limit_send_message(
+        sent = await send_with_fallback(
             bot,
             chat_id,
             part,
@@ -340,7 +369,7 @@ async def _convert_status_to_content(
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     chat_id = session_manager.resolve_chat_id(user_id, thread_id)
 
-    msg_id, stored_wid, _last_text = info
+    msg_id, stored_wid, _ = info
     if stored_wid != window_id:
         # Different window, just delete the old status
         try:
@@ -394,15 +423,6 @@ async def _process_status_update_task(
         await _do_clear_status_message(bot, user_id, tid)
         return
 
-    # Send typing indicator if Claude is interruptible (working)
-    from telegram.constants import ChatAction
-
-    if "esc to interrupt" in status_text.lower():
-        try:
-            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        except Exception:
-            pass
-
     current_info = _status_msg_info.get(skey)
 
     if current_info:
@@ -414,9 +434,19 @@ async def _process_status_update_task(
             await _do_send_status_message(bot, user_id, tid, wid, status_text)
         elif status_text == last_text:
             # Same content, skip edit
-            pass
+            return
         else:
             # Same window, text changed - edit in place
+            # Send typing indicator when Claude is working
+            if "esc to interrupt" in status_text.lower():
+                try:
+                    await bot.send_chat_action(
+                        chat_id=chat_id, action=ChatAction.TYPING
+                    )
+                except RetryAfter:
+                    raise
+                except Exception:
+                    pass
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
@@ -459,7 +489,15 @@ async def _do_send_status_message(
     skey = (user_id, thread_id_or_0)
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     chat_id = session_manager.resolve_chat_id(user_id, thread_id)
-    sent = await rate_limit_send_message(
+    # Send typing indicator when Claude is working
+    if "esc to interrupt" in text.lower():
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except RetryAfter:
+            raise
+        except Exception:
+            pass
+    sent = await send_with_fallback(
         bot,
         chat_id,
         text,
@@ -550,7 +588,21 @@ async def enqueue_status_update(
     status_text: str | None,
     thread_id: int | None = None,
 ) -> None:
-    """Enqueue status update."""
+    """Enqueue status update. Skipped if text unchanged or during flood control."""
+    # Don't enqueue during flood control — they'd just be dropped
+    flood_end = _flood_until.get(user_id, 0)
+    if flood_end > time.monotonic():
+        return
+
+    tid = thread_id or 0
+
+    # Deduplicate: skip if text matches what's already displayed
+    if status_text:
+        skey = (user_id, tid)
+        info = _status_msg_info.get(skey)
+        if info and info[1] == window_id and info[2] == status_text:
+            return
+
     queue = get_or_create_queue(bot, user_id)
 
     if status_text:
@@ -588,7 +640,7 @@ def clear_tool_msg_ids_for_topic(user_id: int, thread_id: int | None = None) -> 
 
 async def shutdown_workers() -> None:
     """Stop all queue workers (called during bot shutdown)."""
-    for user_id, worker in list(_queue_workers.items()):
+    for _, worker in list(_queue_workers.items()):
         worker.cancel()
         try:
             await worker
