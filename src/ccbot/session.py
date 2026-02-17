@@ -80,20 +80,6 @@ class ClaudeSession:
     message_count: int
     file_path: str
 
-    @property
-    def short_summary(self) -> str:
-        if len(self.summary) > 30:
-            return self.summary[:27] + "..."
-        return self.summary
-
-
-@dataclass
-class UnreadInfo:
-    """Information about unread messages for a user's window."""
-
-    has_unread: bool
-    start_offset: int  # User's last read offset
-    end_offset: int  # Current file size
 
 
 @dataclass
@@ -117,21 +103,8 @@ class SessionManager:
     # window_id -> display name (window_name)
     window_display_names: dict[str, str] = field(default_factory=dict)
 
-    # Reverse index: (user_id, window_id) -> thread_id for O(1) inbound lookups
-    _window_to_thread: dict[tuple[int, str], int] = field(
-        default_factory=dict, repr=False
-    )
-
     def __post_init__(self) -> None:
         self._load_state()
-        self._rebuild_reverse_index()
-
-    def _rebuild_reverse_index(self) -> None:
-        """Rebuild _window_to_thread from thread_bindings."""
-        self._window_to_thread = {}
-        for uid, bindings in self.thread_bindings.items():
-            for tid, wid in bindings.items():
-                self._window_to_thread[(uid, wid)] = tid
 
     def _save_state(self) -> None:
         state: dict[str, Any] = {
@@ -197,9 +170,7 @@ class SessionManager:
                         "Detected old-format state (window_name keys), "
                         "will re-resolve on startup"
                     )
-                    self._needs_migration = True
-                else:
-                    self._needs_migration = False
+                    pass
 
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning("Failed to load state: %s", e)
@@ -208,9 +179,7 @@ class SessionManager:
                 self.thread_bindings = {}
                 self.group_chat_ids = {}
                 self.window_display_names = {}
-                self._needs_migration = False
-        else:
-            self._needs_migration = False
+                pass
 
     async def resolve_stale_ids(self) -> None:
         """Re-resolve persisted window IDs against live tmux windows.
@@ -349,11 +318,8 @@ class SessionManager:
             self.user_window_offsets[uid] = new_offsets
 
         if changed:
-            self._rebuild_reverse_index()
             self._save_state()
             logger.info("Startup re-resolution complete")
-
-        self._needs_migration = False
 
         # Clean up old-format keys from session_map.json
         await self._cleanup_old_format_session_map_keys()
@@ -381,23 +347,15 @@ class SessionManager:
         for key in old_keys:
             del session_map[key]
         atomic_write_json(config.session_map_file, session_map)
-        logger.info("Cleaned up %d old-format session_map keys: %s", len(old_keys), old_keys)
+        logger.info(
+            "Cleaned up %d old-format session_map keys: %s", len(old_keys), old_keys
+        )
 
     # --- Display name management ---
 
     def get_display_name(self, window_id: str) -> str:
         """Get display name for a window_id, fallback to window_id itself."""
         return self.window_display_names.get(window_id, window_id)
-
-    def set_display_name(self, window_id: str, window_name: str) -> None:
-        """Update display name for a window_id."""
-        if self.window_display_names.get(window_id) != window_name:
-            self.window_display_names[window_id] = window_name
-            # Also update WindowState if it exists
-            ws = self.window_states.get(window_id)
-            if ws:
-                ws.window_name = window_name
-            self._save_state()
 
     async def wait_for_session_map_entry(
         self, window_id: str, timeout: float = 5.0, interval: float = 0.5
@@ -488,9 +446,7 @@ class SessionManager:
                     changed = True
 
         # Clean up window_states entries not in current session_map.
-        stale_wids = [
-            w for w in self.window_states if w and w not in valid_wids
-        ]
+        stale_wids = [w for w in self.window_states if w and w not in valid_wids]
         for wid in stale_wids:
             logger.info("Removing stale window_state: %s", wid)
             del self.window_states[wid]
@@ -607,16 +563,6 @@ class SessionManager:
 
     # --- User window offset management ---
 
-    def get_user_window_offset(self, user_id: int, window_id: str) -> int | None:
-        """Get the user's last read offset for a window.
-
-        Returns None if no offset has been recorded (first time).
-        """
-        user_offsets = self.user_window_offsets.get(user_id)
-        if user_offsets is None:
-            return None
-        return user_offsets.get(window_id)
-
     def update_user_window_offset(
         self, user_id: int, window_id: str, offset: int
     ) -> None:
@@ -625,48 +571,6 @@ class SessionManager:
             self.user_window_offsets[user_id] = {}
         self.user_window_offsets[user_id][window_id] = offset
         self._save_state()
-
-    async def get_unread_info(self, user_id: int, window_id: str) -> UnreadInfo | None:
-        """Get unread message info for a user's window.
-
-        Returns UnreadInfo if there are potentially unread messages,
-        None if the session/file cannot be resolved.
-        """
-        session = await self.resolve_session_for_window(window_id)
-        if not session or not session.file_path:
-            return None
-
-        file_path = Path(session.file_path)
-        if not file_path.exists():
-            return None
-
-        try:
-            file_size = file_path.stat().st_size
-        except OSError:
-            return None
-
-        user_offset = self.get_user_window_offset(user_id, window_id)
-
-        # If user has no offset, they haven't viewed this window before
-        # Initialize to current file size (no unread)
-        if user_offset is None:
-            return UnreadInfo(
-                has_unread=False,
-                start_offset=file_size,
-                end_offset=file_size,
-            )
-
-        # Detect file truncation (e.g., after /clear)
-        if user_offset > file_size:
-            # Reset offset to 0, show all content as unread
-            user_offset = 0
-
-        has_unread = user_offset < file_size
-        return UnreadInfo(
-            has_unread=has_unread,
-            start_offset=user_offset,
-            end_offset=file_size,
-        )
 
     # --- Thread binding management ---
 
@@ -684,7 +588,6 @@ class SessionManager:
         if user_id not in self.thread_bindings:
             self.thread_bindings[user_id] = {}
         self.thread_bindings[user_id][thread_id] = window_id
-        self._window_to_thread[(user_id, window_id)] = thread_id
         if window_name:
             self.window_display_names[window_id] = window_name
         self._save_state()
@@ -703,7 +606,6 @@ class SessionManager:
         if not bindings or thread_id not in bindings:
             return None
         window_id = bindings.pop(thread_id)
-        self._window_to_thread.pop((user_id, window_id), None)
         if not bindings:
             del self.thread_bindings[user_id]
         self._save_state()
@@ -721,14 +623,6 @@ class SessionManager:
         if not bindings:
             return None
         return bindings.get(thread_id)
-
-    def get_thread_for_window(self, user_id: int, window_id: str) -> int | None:
-        """Reverse lookup: get thread_id for a window (O(1) via reverse index)."""
-        return self._window_to_thread.get((user_id, window_id))
-
-    def get_all_thread_windows(self, user_id: int) -> dict[int, str]:
-        """Get all thread bindings for a user."""
-        return dict(self.thread_bindings.get(user_id, {}))
 
     def resolve_window_for_thread(
         self,
