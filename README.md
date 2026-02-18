@@ -262,3 +262,11 @@ src/ccbot/
     ├── response_builder.py # Response message building (format tool_use, thinking, etc.)
     └── status_polling.py  # Terminal status line polling
 ```
+
+## Contributors
+
+Thanks to all the people who contribute! We encourage using Claude Code to collaborate on contributions.
+
+<a href="https://github.com/six-ddc/ccmux/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=six-ddc/ccmux" />
+</a>

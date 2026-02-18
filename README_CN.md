@@ -277,3 +277,11 @@ src/ccbot/
     ├── response_builder.py # 响应消息构建（格式化 tool_use、思考等）
     └── status_polling.py  # 终端状态行轮询
 ```
+
+## 贡献者
+
+感谢所有贡献者！我们鼓励使用 Claude Code 协同参与项目贡献。
+
+<a href="https://github.com/six-ddc/ccmux/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=six-ddc/ccmux" />
+</a>
