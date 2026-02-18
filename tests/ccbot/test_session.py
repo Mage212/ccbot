@@ -33,6 +33,63 @@ class TestThreadBindings:
         assert result == {(100, 1, "@1"), (100, 2, "@2"), (200, 3, "@3")}
 
 
+class TestGroupChatId:
+    """Tests for group chat_id routing (supergroup forum topic support).
+
+    IMPORTANT: These tests protect against regression. The group_chat_ids
+    mapping is required for Telegram supergroup forum topics — without it,
+    all outbound messages fail with "Message thread not found". This was
+    erroneously removed once (26cb81f) and restored in PR #23. Do NOT
+    delete these tests or the underlying functionality.
+    """
+
+    def test_resolve_with_stored_group_id(self, mgr: SessionManager) -> None:
+        """resolve_chat_id returns stored group chat_id for known thread."""
+        mgr.set_group_chat_id(100, 1, -1001234567890)
+        assert mgr.resolve_chat_id(100, 1) == -1001234567890
+
+    def test_resolve_without_group_id_falls_back_to_user_id(
+        self, mgr: SessionManager
+    ) -> None:
+        """resolve_chat_id falls back to user_id when no group_id stored."""
+        assert mgr.resolve_chat_id(100, 1) == 100
+
+    def test_resolve_none_thread_id_falls_back_to_user_id(
+        self, mgr: SessionManager
+    ) -> None:
+        """resolve_chat_id returns user_id when thread_id is None (private chat)."""
+        mgr.set_group_chat_id(100, 1, -1001234567890)
+        assert mgr.resolve_chat_id(100) == 100
+
+    def test_set_group_chat_id_overwrites(self, mgr: SessionManager) -> None:
+        """set_group_chat_id updates the stored value on change."""
+        mgr.set_group_chat_id(100, 1, -999)
+        mgr.set_group_chat_id(100, 1, -888)
+        assert mgr.resolve_chat_id(100, 1) == -888
+
+    def test_multiple_threads_independent(self, mgr: SessionManager) -> None:
+        """Different threads for the same user store independent group chat_ids."""
+        mgr.set_group_chat_id(100, 1, -111)
+        mgr.set_group_chat_id(100, 2, -222)
+        assert mgr.resolve_chat_id(100, 1) == -111
+        assert mgr.resolve_chat_id(100, 2) == -222
+
+    def test_multiple_users_independent(self, mgr: SessionManager) -> None:
+        """Different users store independent group chat_ids."""
+        mgr.set_group_chat_id(100, 1, -111)
+        mgr.set_group_chat_id(200, 1, -222)
+        assert mgr.resolve_chat_id(100, 1) == -111
+        assert mgr.resolve_chat_id(200, 1) == -222
+
+    def test_set_group_chat_id_with_none_thread(self, mgr: SessionManager) -> None:
+        """set_group_chat_id handles None thread_id (mapped to 0)."""
+        mgr.set_group_chat_id(100, None, -999)
+        # thread_id=None in resolve falls back to user_id (by design)
+        assert mgr.resolve_chat_id(100, None) == 100
+        # The stored key is "100:0", only accessible with explicit thread_id=0
+        assert mgr.group_chat_ids.get("100:0") == -999
+
+
 class TestWindowState:
     def test_get_creates_new(self, mgr: SessionManager) -> None:
         state = mgr.get_window_state("@0")

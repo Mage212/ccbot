@@ -101,6 +101,13 @@ class SessionManager:
     # window_id -> display name (window_name)
     window_display_names: dict[str, str] = field(default_factory=dict)
     # "user_id:thread_id" -> group chat_id (for supergroup forum topic routing)
+    # IMPORTANT: This mapping is essential for supergroup/forum topic support.
+    # Telegram Bot API requires group chat_id (negative number like -100xxx)
+    # as the chat_id parameter when sending messages to forum topics.
+    # Using user_id as chat_id will fail with "Message thread not found".
+    # See: https://core.telegram.org/bots/api#sendmessage
+    # History: originally added in 5afc111, erroneously removed in 26cb81f,
+    # restored in PR #23.
     group_chat_ids: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -367,7 +374,13 @@ class SessionManager:
         """Store the group chat_id for a user+thread combination.
 
         In supergroups with forum topics, messages must be sent to the group's
-        chat_id (negative number) rather than the user's personal ID.
+        chat_id (negative number like -100xxx) rather than the user's personal ID.
+        Telegram's Bot API rejects message_thread_id when chat_id is a private
+        user ID — the thread only exists within the group context.
+
+        DO NOT REMOVE this method or the group_chat_ids mapping.
+        Without it, all outbound messages in forum topics fail with
+        "Message thread not found". See commit history: 5afc111 → 26cb81f → PR #23.
         """
         tid = thread_id or 0
         key = f"{user_id}:{tid}"
@@ -386,6 +399,11 @@ class SessionManager:
 
         Returns the stored group chat_id when a thread_id is present and a
         mapping exists, otherwise falls back to user_id (for private chats).
+
+        Every outbound Telegram API call (send_message, edit_message_text,
+        delete_message, send_chat_action, edit_forum_topic, etc.) MUST use
+        this method instead of raw user_id. Using user_id directly breaks
+        supergroup forum topic routing.
         """
         if thread_id is not None:
             key = f"{user_id}:{thread_id}"

@@ -13,6 +13,10 @@ class TestConfigIntegration:
         env_file.write_text(
             "TELEGRAM_BOT_TOKEN=from-dotenv-token\nALLOWED_USERS=99999\n"
         )
+        # chdir away from repo root so load_dotenv won't find the real .env
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        monkeypatch.chdir(workdir)
         monkeypatch.setenv("CCBOT_DIR", str(tmp_path))
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
         monkeypatch.delenv("ALLOWED_USERS", raising=False)

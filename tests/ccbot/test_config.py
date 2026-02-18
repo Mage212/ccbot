@@ -7,6 +7,8 @@ from ccbot.config import Config
 
 @pytest.fixture
 def _base_env(monkeypatch, tmp_path):
+    # chdir to tmp_path so load_dotenv won't find the real .env in repo root
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test:token")
     monkeypatch.setenv("ALLOWED_USERS", "12345")
     monkeypatch.setenv("CCBOT_DIR", str(tmp_path))

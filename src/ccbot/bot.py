@@ -239,6 +239,10 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "❌ This command only works in a topic.")
+        return
+
     wid = session_manager.get_window_for_thread(user.id, thread_id)
     if not wid:
         await safe_reply(update.message, "❌ No session bound to this topic.")
@@ -386,7 +390,9 @@ async def forward_command_handler(
 
     thread_id = _get_thread_id(update)
 
-    # Capture group chat_id for supergroup forum topic routing
+    # Capture group chat_id for supergroup forum topic routing.
+    # Required: Telegram Bot API needs group chat_id (not user_id) to send
+    # messages with message_thread_id. Do NOT remove — see session.py docs.
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
@@ -543,7 +549,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     thread_id = _get_thread_id(update)
 
-    # Capture group chat_id for supergroup forum topic routing
+    # Capture group chat_id for supergroup forum topic routing.
+    # Required: Telegram Bot API needs group chat_id (not user_id) to send
+    # messages with message_thread_id. Do NOT remove — see session.py docs.
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
@@ -700,7 +708,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     data = query.data
 
-    # Capture group chat_id for supergroup forum topic routing
+    # Capture group chat_id for supergroup forum topic routing.
+    # Required: Telegram Bot API needs group chat_id (not user_id) to send
+    # messages with message_thread_id. Do NOT remove — see session.py docs.
     cb_thread_id = _get_thread_id(update)
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
