@@ -1,14 +1,18 @@
-"""Safe message sending helpers with MarkdownV2 fallback.
+"""Safe message sending helpers with MarkdownV2/HTML fallback.
 
 Provides utility functions for sending Telegram messages with automatic
-conversion to MarkdownV2 format and fallback to plain text on failure.
+format conversion and fallback to plain text on failure.
+
+Supports two formatting modes via CCBOT_USE_HTML_CONVERTER env var:
+  - MarkdownV2 (default): Uses telegramify-markdown library
+  - HTML: Uses chatgpt-md-converter library
 
 Functions:
-  - send_with_fallback: Send with MarkdownV2 → plain text fallback
+  - send_with_fallback: Send with formatting → plain text fallback
   - send_photo: Photo sending (single or media group)
-  - safe_reply: Reply with MarkdownV2, fallback to plain text
-  - safe_edit: Edit message with MarkdownV2, fallback to plain text
-  - safe_send: Send message with MarkdownV2, fallback to plain text
+  - safe_reply: Reply with formatting, fallback to plain text
+  - safe_edit: Edit message with formatting, fallback to plain text
+  - safe_send: Send message with formatting, fallback to plain text
 
 Rate limiting is handled globally by AIORateLimiter on the Application.
 RetryAfter exceptions are re-raised so callers (queue worker) can handle them.
@@ -21,23 +25,46 @@ from typing import Any
 from telegram import Bot, InputMediaPhoto, LinkPreviewOptions, Message
 from telegram.error import RetryAfter
 
-from ..markdown_v2 import convert_markdown
-from ..transcript_parser import TranscriptParser
+from ..config import config
 
 logger = logging.getLogger(__name__)
 
-# Sentinel characters to strip from plain text fallback
-_SENTINELS = (
-    TranscriptParser.EXPANDABLE_QUOTE_START,
-    TranscriptParser.EXPANDABLE_QUOTE_END,
-)
+# Conditional import based on config
+if config.use_html_converter:
+    from ..html_converter import convert_markdown, strip_sentinels
 
+    # HTML tags that indicate text is already converted
+    _HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
 
-def _strip_sentinels(text: str) -> str:
-    """Strip expandable quote sentinel markers for plain text fallback."""
-    for s in _SENTINELS:
-        text = text.replace(s, "")
-    return text
+    def _is_already_html(text: str) -> bool:
+        """Check if text already contains Telegram HTML formatting."""
+        return any(tag in text for tag in _HTML_TAGS)
+
+    def _ensure_html(text: str) -> str:
+        """Convert to HTML only if not already converted."""
+        if _is_already_html(text):
+            return text
+        return convert_markdown(text)
+
+    PARSE_MODE = "HTML"
+else:
+    from ..markdown_v2 import convert_markdown  # noqa: F401 - used in _ensure_html
+    from ..transcript_parser import TranscriptParser
+
+    def strip_sentinels(text: str) -> str:
+        """Strip expandable quote sentinel markers for plain text fallback."""
+        for s in (
+            TranscriptParser.EXPANDABLE_QUOTE_START,
+            TranscriptParser.EXPANDABLE_QUOTE_END,
+        ):
+            text = text.replace(s, "")
+        return text
+
+    def _ensure_html(text: str) -> str:
+        """For MarkdownV2 mode, always convert."""
+        return convert_markdown(text)
+
+    PARSE_MODE = "MarkdownV2"
 
 
 # Disable link previews in all messages to reduce visual noise
@@ -59,8 +86,8 @@ async def send_with_fallback(
     try:
         return await bot.send_message(
             chat_id=chat_id,
-            text=convert_markdown(text),
-            parse_mode="MarkdownV2",
+            text=_ensure_html(text),
+            parse_mode=PARSE_MODE,
             **kwargs,
         )
     except RetryAfter:
@@ -68,7 +95,7 @@ async def send_with_fallback(
     except Exception:
         try:
             return await bot.send_message(
-                chat_id=chat_id, text=_strip_sentinels(text), **kwargs
+                chat_id=chat_id, text=strip_sentinels(text), **kwargs
             )
         except RetryAfter:
             raise
@@ -120,19 +147,19 @@ async def send_photo(
 
 
 async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message:
-    """Reply with MarkdownV2, falling back to plain text on failure."""
+    """Reply with formatting, falling back to plain text on failure."""
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     try:
         return await message.reply_text(
-            convert_markdown(text),
-            parse_mode="MarkdownV2",
+            _ensure_html(text),
+            parse_mode=PARSE_MODE,
             **kwargs,
         )
     except RetryAfter:
         raise
     except Exception:
         try:
-            return await message.reply_text(_strip_sentinels(text), **kwargs)
+            return await message.reply_text(strip_sentinels(text), **kwargs)
         except RetryAfter:
             raise
         except Exception as e:
@@ -141,19 +168,19 @@ async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message:
 
 
 async def safe_edit(target: Any, text: str, **kwargs: Any) -> None:
-    """Edit message with MarkdownV2, falling back to plain text on failure."""
+    """Edit message with formatting, falling back to plain text on failure."""
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     try:
         await target.edit_message_text(
-            convert_markdown(text),
-            parse_mode="MarkdownV2",
+            _ensure_html(text),
+            parse_mode=PARSE_MODE,
             **kwargs,
         )
     except RetryAfter:
         raise
     except Exception:
         try:
-            await target.edit_message_text(_strip_sentinels(text), **kwargs)
+            await target.edit_message_text(strip_sentinels(text), **kwargs)
         except RetryAfter:
             raise
         except Exception as e:
@@ -167,15 +194,15 @@ async def safe_send(
     message_thread_id: int | None = None,
     **kwargs: Any,
 ) -> None:
-    """Send message with MarkdownV2, falling back to plain text on failure."""
+    """Send message with formatting, falling back to plain text on failure."""
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     if message_thread_id is not None:
         kwargs.setdefault("message_thread_id", message_thread_id)
     try:
         await bot.send_message(
             chat_id=chat_id,
-            text=convert_markdown(text),
-            parse_mode="MarkdownV2",
+            text=_ensure_html(text),
+            parse_mode=PARSE_MODE,
             **kwargs,
         )
     except RetryAfter:
@@ -183,7 +210,7 @@ async def safe_send(
     except Exception:
         try:
             await bot.send_message(
-                chat_id=chat_id, text=_strip_sentinels(text), **kwargs
+                chat_id=chat_id, text=strip_sentinels(text), **kwargs
             )
         except RetryAfter:
             raise

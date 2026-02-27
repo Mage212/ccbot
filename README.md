@@ -92,6 +92,7 @@ ALLOWED_USERS=your_telegram_user_id
 | `CLAUDE_COMMAND`        | `claude`   | Command to run in new windows                    |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
+| `CCBOT_USE_HTML_CONVERTER` | `false` | Use HTML formatting (better code block splitting) |
 
 > If running on a VPS where there's no interactive terminal to approve permissions, consider:
 >
@@ -247,6 +248,7 @@ src/ccbot/
 ├── transcript_parser.py   # Claude Code JSONL transcript parsing
 ├── terminal_parser.py     # Terminal pane parsing (interactive UI + status line)
 ├── markdown_v2.py         # Markdown → Telegram MarkdownV2 conversion
+├── html_converter.py      # Markdown → HTML conversion (alternative formatter)
 ├── telegram_sender.py     # Message splitting + synchronous HTTP send
 ├── screenshot.py          # Terminal text → PNG image with ANSI color support
 ├── utils.py               # Shared utilities (atomic JSON writes, JSONL helpers)

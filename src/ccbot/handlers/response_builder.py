@@ -13,8 +13,14 @@ Key function:
   - build_response_parts: Build paginated response messages
 """
 
-from ..telegram_sender import split_message
+from ..config import config
 from ..transcript_parser import TranscriptParser
+
+# Conditional import based on config
+if config.use_html_converter:
+    from ..html_converter import split_message
+else:
+    from ..telegram_sender import split_message
 
 
 def build_response_parts(
