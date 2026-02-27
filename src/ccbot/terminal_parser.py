@@ -76,8 +76,19 @@ UI_PATTERNS: list[UIPattern] = [
         top=(
             re.compile(r"^\s*Do you want to proceed\?"),
             re.compile(r"^\s*Do you want to make this edit"),
+            re.compile(r"^\s*Do you want to create \S"),
+            re.compile(r"^\s*Do you want to delete \S"),
         ),
         bottom=(re.compile(r"^\s*Esc to cancel"),),
+    ),
+    UIPattern(
+        # Permission menu with numbered choices (no "Esc to cancel" line)
+        name="PermissionPrompt",
+        top=(
+            re.compile(r"^\s*❯\s*1\.\s*Yes"),
+        ),
+        bottom=(),
+        min_gap=2,
     ),
     UIPattern(
         name="RestoreCheckpoint",
