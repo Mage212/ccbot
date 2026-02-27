@@ -91,6 +91,15 @@ UI_PATTERNS: list[UIPattern] = [
         min_gap=2,
     ),
     UIPattern(
+        # Bash command approval
+        name="BashApproval",
+        top=(
+            re.compile(r"^\s*Bash command\s*$"),
+            re.compile(r"^\s*This command requires approval"),
+        ),
+        bottom=(re.compile(r"^\s*Esc to cancel"),),
+    ),
+    UIPattern(
         name="RestoreCheckpoint",
         top=(re.compile(r"^\s*Restore the code"),),
         bottom=(re.compile(r"^\s*Enter to continue"),),
