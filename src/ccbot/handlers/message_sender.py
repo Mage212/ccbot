@@ -1,11 +1,9 @@
-"""Safe message sending helpers with MarkdownV2/HTML fallback.
+"""Safe message sending helpers with HTML formatting.
 
 Provides utility functions for sending Telegram messages with automatic
 format conversion and fallback to plain text on failure.
 
-Supports two formatting modes via CCBOT_USE_HTML_CONVERTER env var:
-  - MarkdownV2 (default): Uses telegramify-markdown library
-  - HTML: Uses chatgpt-md-converter library
+Uses chatgpt-md-converter for HTML formatting with tag-aware splitting.
 
 Functions:
   - send_with_fallback: Send with formatting → plain text fallback
@@ -25,46 +23,27 @@ from typing import Any
 from telegram import Bot, InputMediaPhoto, LinkPreviewOptions, Message
 from telegram.error import RetryAfter
 
-from ..config import config
+from ..html_converter import convert_markdown, strip_sentinels
 
 logger = logging.getLogger(__name__)
 
-# Conditional import based on config
-if config.use_html_converter:
-    from ..html_converter import convert_markdown, strip_sentinels
+# HTML tags that indicate text is already converted
+_HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
 
-    # HTML tags that indicate text is already converted
-    _HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
 
-    def _is_already_html(text: str) -> bool:
-        """Check if text already contains Telegram HTML formatting."""
-        return any(tag in text for tag in _HTML_TAGS)
+def _is_already_html(text: str) -> bool:
+    """Check if text already contains Telegram HTML formatting."""
+    return any(tag in text for tag in _HTML_TAGS)
 
-    def _ensure_html(text: str) -> str:
-        """Convert to HTML only if not already converted."""
-        if _is_already_html(text):
-            return text
-        return convert_markdown(text)
 
-    PARSE_MODE = "HTML"
-else:
-    from ..markdown_v2 import convert_markdown  # noqa: F401 - used in _ensure_html
-    from ..transcript_parser import TranscriptParser
-
-    def strip_sentinels(text: str) -> str:
-        """Strip expandable quote sentinel markers for plain text fallback."""
-        for s in (
-            TranscriptParser.EXPANDABLE_QUOTE_START,
-            TranscriptParser.EXPANDABLE_QUOTE_END,
-        ):
-            text = text.replace(s, "")
+def _ensure_html(text: str) -> str:
+    """Convert to HTML only if not already converted."""
+    if _is_already_html(text):
         return text
+    return convert_markdown(text)
 
-    def _ensure_html(text: str) -> str:
-        """For MarkdownV2 mode, always convert."""
-        return convert_markdown(text)
 
-    PARSE_MODE = "MarkdownV2"
+PARSE_MODE = "HTML"
 
 
 # Disable link previews in all messages to reduce visual noise

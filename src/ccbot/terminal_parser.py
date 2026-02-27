@@ -84,9 +84,7 @@ UI_PATTERNS: list[UIPattern] = [
     UIPattern(
         # Permission menu with numbered choices (no "Esc to cancel" line)
         name="PermissionPrompt",
-        top=(
-            re.compile(r"^\s*❯\s*1\.\s*Yes"),
-        ),
+        top=(re.compile(r"^\s*❯\s*1\.\s*Yes"),),
         bottom=(),
         min_gap=2,
     ),

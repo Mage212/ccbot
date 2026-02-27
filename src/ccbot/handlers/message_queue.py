@@ -27,7 +27,7 @@ from telegram import Bot
 from telegram.constants import ChatAction
 from telegram.error import RetryAfter
 
-from ..config import config
+from ..html_converter import convert_markdown, strip_sentinels
 from ..session import session_manager
 from ..terminal_parser import parse_status_line
 from ..tmux_manager import tmux_manager
@@ -35,39 +35,20 @@ from .message_sender import NO_LINK_PREVIEW, PARSE_MODE, send_photo, send_with_f
 
 logger = logging.getLogger(__name__)
 
-# Conditional import based on config
-if config.use_html_converter:
-    from ..html_converter import convert_markdown, strip_sentinels
+# HTML tags that indicate text is already converted
+_HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
 
-    # HTML tags that indicate text is already converted
-    _HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
 
-    def _is_already_html(text: str) -> bool:
-        """Check if text already contains Telegram HTML formatting."""
-        return any(tag in text for tag in _HTML_TAGS)
+def _is_already_html(text: str) -> bool:
+    """Check if text already contains Telegram HTML formatting."""
+    return any(tag in text for tag in _HTML_TAGS)
 
-    def _ensure_html(text: str) -> str:
-        """Convert to HTML only if not already converted."""
-        if _is_already_html(text):
-            return text
-        return convert_markdown(text)
 
-else:
-    from ..markdown_v2 import convert_markdown
-    from ..transcript_parser import TranscriptParser
-
-    def strip_sentinels(text: str) -> str:
-        """Strip expandable quote sentinel markers for plain text fallback."""
-        for s in (
-            TranscriptParser.EXPANDABLE_QUOTE_START,
-            TranscriptParser.EXPANDABLE_QUOTE_END,
-        ):
-            text = text.replace(s, "")
+def _ensure_html(text: str) -> str:
+    """Convert to HTML only if not already converted."""
+    if _is_already_html(text):
         return text
-
-    def _ensure_html(text: str) -> str:
-        """For MarkdownV2 mode, always convert."""
-        return convert_markdown(text)
+    return convert_markdown(text)
 
 
 # Merge limit for content messages
