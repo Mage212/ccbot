@@ -123,7 +123,7 @@ from .handlers.status_polling import status_poll_loop
 from .screenshot import text_to_image
 from .session import session_manager
 from .session_monitor import NewMessage, SessionMonitor
-from .terminal_parser import extract_bash_output
+from .terminal_parser import extract_bash_output, is_interactive_ui
 from .tmux_manager import tmux_manager
 from .utils import ccbot_dir
 
@@ -806,6 +806,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Cancel any running bash capture — new message pushes pane content down
     _cancel_bash_capture(user.id, thread_id)
+
+    # Check for pending interactive UI before sending text.
+    # This catches UIs (permission prompts, etc.) that status polling might have missed.
+    pane_text = await tmux_manager.capture_pane(w.window_id)
+    if pane_text and is_interactive_ui(pane_text):
+        # UI detected — show it to user, then send text (acts as Enter)
+        logger.info(
+            "Detected pending interactive UI before sending text (user=%d, thread=%s)",
+            user.id,
+            thread_id,
+        )
+        await handle_interactive_ui(context.bot, user.id, wid, thread_id)
+        # Small delay to let UI render in Telegram before text arrives
+        await asyncio.sleep(0.3)
 
     success, message = await session_manager.send_to_window(wid, text)
     if not success:

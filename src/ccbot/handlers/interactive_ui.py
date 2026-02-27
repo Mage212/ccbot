@@ -204,7 +204,9 @@ async def handle_interactive_ui(
             return True
         except Exception:
             # Edit failed (message deleted, etc.) - clear stale msg_id and send new
-            logger.debug("Edit failed for interactive msg %s, sending new", existing_msg_id)
+            logger.debug(
+                "Edit failed for interactive msg %s, sending new", existing_msg_id
+            )
             _interactive_msgs.pop(ikey, None)
             # Fall through to send new message
 
