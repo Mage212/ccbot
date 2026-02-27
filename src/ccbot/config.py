@@ -90,6 +90,11 @@ class Config:
             os.getenv("CCBOT_SHOW_HIDDEN_DIRS", "").lower() == "true"
         )
 
+        # Use chatgpt-md-converter for HTML formatting instead of MarkdownV2
+        self.use_html_converter = (
+            os.getenv("CCBOT_USE_HTML_CONVERTER", "false").lower() == "true"
+        )
+
         logger.debug(
             "Config initialized: dir=%s, token=%s..., allowed_users=%d, "
             "tmux_session=%s, claude_projects_path=%s",

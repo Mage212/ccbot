@@ -27,14 +27,48 @@ from telegram import Bot
 from telegram.constants import ChatAction
 from telegram.error import RetryAfter
 
-from ..markdown_v2 import convert_markdown
+from ..config import config
 from ..session import session_manager
-from ..transcript_parser import TranscriptParser
 from ..terminal_parser import parse_status_line
 from ..tmux_manager import tmux_manager
-from .message_sender import NO_LINK_PREVIEW, send_photo, send_with_fallback
+from .message_sender import NO_LINK_PREVIEW, PARSE_MODE, send_photo, send_with_fallback
 
 logger = logging.getLogger(__name__)
+
+# Conditional import based on config
+if config.use_html_converter:
+    from ..html_converter import convert_markdown, strip_sentinels
+
+    # HTML tags that indicate text is already converted
+    _HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
+
+    def _is_already_html(text: str) -> bool:
+        """Check if text already contains Telegram HTML formatting."""
+        return any(tag in text for tag in _HTML_TAGS)
+
+    def _ensure_html(text: str) -> str:
+        """Convert to HTML only if not already converted."""
+        if _is_already_html(text):
+            return text
+        return convert_markdown(text)
+
+else:
+    from ..markdown_v2 import convert_markdown
+    from ..transcript_parser import TranscriptParser
+
+    def strip_sentinels(text: str) -> str:
+        """Strip expandable quote sentinel markers for plain text fallback."""
+        for s in (
+            TranscriptParser.EXPANDABLE_QUOTE_START,
+            TranscriptParser.EXPANDABLE_QUOTE_END,
+        ):
+            text = text.replace(s, "")
+        return text
+
+    def _ensure_html(text: str) -> str:
+        """For MarkdownV2 mode, always convert."""
+        return convert_markdown(text)
+
 
 # Merge limit for content messages
 MERGE_MAX_LENGTH = 3800  # Leave room for markdown conversion overhead
@@ -305,8 +339,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=edit_msg_id,
-                    text=convert_markdown(full_text),
-                    parse_mode="MarkdownV2",
+                    text=_ensure_html(full_text),
+                    parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
                 await _send_task_images(bot, chat_id, task)
@@ -317,11 +351,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             except Exception:
                 try:
                     # Fallback: plain text with sentinels stripped
-                    plain_text = (
-                        (task.text or full_text)
-                        .replace(TranscriptParser.EXPANDABLE_QUOTE_START, "")
-                        .replace(TranscriptParser.EXPANDABLE_QUOTE_END, "")
-                    )
+                    plain_text = strip_sentinels(task.text or full_text)
                     await bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=edit_msg_id,
@@ -409,8 +439,8 @@ async def _convert_status_to_content(
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=msg_id,
-            text=convert_markdown(content_text),
-            parse_mode="MarkdownV2",
+            text=_ensure_html(content_text),
+            parse_mode=PARSE_MODE,
             link_preview_options=NO_LINK_PREVIEW,
         )
         return msg_id
@@ -419,9 +449,7 @@ async def _convert_status_to_content(
     except Exception:
         try:
             # Fallback to plain text with sentinels stripped
-            plain = content_text.replace(
-                TranscriptParser.EXPANDABLE_QUOTE_START, ""
-            ).replace(TranscriptParser.EXPANDABLE_QUOTE_END, "")
+            plain = strip_sentinels(content_text)
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=msg_id,
@@ -480,8 +508,8 @@ async def _process_status_update_task(
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=msg_id,
-                    text=convert_markdown(status_text),
-                    parse_mode="MarkdownV2",
+                    text=_ensure_html(status_text),
+                    parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
