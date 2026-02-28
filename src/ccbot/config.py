@@ -18,6 +18,9 @@ from .utils import ccbot_dir
 
 logger = logging.getLogger(__name__)
 
+# Env vars that must not leak to child processes (e.g. Claude Code via tmux)
+SENSITIVE_ENV_VARS = {"TELEGRAM_BOT_TOKEN", "ALLOWED_USERS"}
+
 
 class Config:
     """Application configuration loaded from environment variables."""
@@ -89,6 +92,11 @@ class Config:
         self.show_hidden_dirs = (
             os.getenv("CCBOT_SHOW_HIDDEN_DIRS", "").lower() == "true"
         )
+
+        # Scrub sensitive vars from os.environ so child processes never inherit them.
+        # Values are already captured in Config attributes above.
+        for var in SENSITIVE_ENV_VARS:
+            os.environ.pop(var, None)
 
         logger.debug(
             "Config initialized: dir=%s, token=%s..., allowed_users=%d, "

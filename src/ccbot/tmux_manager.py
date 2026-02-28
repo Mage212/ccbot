@@ -20,7 +20,7 @@ from pathlib import Path
 
 import libtmux
 
-from .config import config
+from .config import SENSITIVE_ENV_VARS, config
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,7 @@ class TmuxManager:
         """Get existing session or create a new one."""
         session = self.get_session()
         if session:
+            self._scrub_session_env(session)
             return session
 
         # Create new session with main window named specifically
@@ -75,7 +76,21 @@ class TmuxManager:
         # Rename the default window to the main window name
         if session.windows:
             session.windows[0].rename_window(config.tmux_main_window_name)
+        self._scrub_session_env(session)
         return session
+
+    @staticmethod
+    def _scrub_session_env(session: libtmux.Session) -> None:
+        """Remove sensitive env vars from the tmux session environment.
+
+        Prevents new windows (and their child processes like Claude Code)
+        from inheriting secrets such as TELEGRAM_BOT_TOKEN.
+        """
+        for var in SENSITIVE_ENV_VARS:
+            try:
+                session.unset_environment(var)
+            except Exception:
+                pass  # var not set in session env — nothing to remove
 
     async def list_windows(self) -> list[TmuxWindow]:
         """List all windows in the session with their working directories.
