@@ -431,6 +431,47 @@ async def topic_closed_handler(
         )
 
 
+async def topic_edited_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle topic rename — sync new name to tmux window and internal state."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+
+    msg = update.message
+    if not msg or not msg.forum_topic_edited:
+        return
+
+    new_name = msg.forum_topic_edited.name
+    if new_name is None:
+        # Icon-only change, no rename needed
+        return
+
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        return
+
+    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    if not wid:
+        logger.debug(
+            "Topic edited: no binding (user=%d, thread=%d)", user.id, thread_id
+        )
+        return
+
+    old_name = session_manager.get_display_name(wid)
+    await tmux_manager.rename_window(wid, new_name)
+    session_manager.update_display_name(wid, new_name)
+    logger.info(
+        "Topic renamed: '%s' -> '%s' (window=%s, user=%d, thread=%d)",
+        old_name,
+        new_name,
+        wid,
+        user.id,
+        thread_id,
+    )
+
+
 async def forward_command_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1598,6 +1639,13 @@ def create_bot() -> Application:
         MessageHandler(
             filters.StatusUpdate.FORUM_TOPIC_CLOSED,
             topic_closed_handler,
+        )
+    )
+    # Topic edited event — sync renamed topic to tmux window
+    application.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.FORUM_TOPIC_EDITED,
+            topic_edited_handler,
         )
     )
     # Forward any other /command to Claude Code

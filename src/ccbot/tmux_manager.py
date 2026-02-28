@@ -324,6 +324,26 @@ class TmuxManager:
 
         return await asyncio.to_thread(_sync_send_keys)
 
+    async def rename_window(self, window_id: str, new_name: str) -> bool:
+        """Rename a tmux window by its ID."""
+
+        def _sync_rename() -> bool:
+            session = self.get_session()
+            if not session:
+                return False
+            try:
+                window = session.windows.get(window_id=window_id)
+                if not window:
+                    return False
+                window.rename_window(new_name)
+                logger.info("Renamed window %s to '%s'", window_id, new_name)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to rename window {window_id}: {e}")
+                return False
+
+        return await asyncio.to_thread(_sync_rename)
+
     async def kill_window(self, window_id: str) -> bool:
         """Kill a tmux window by its ID."""
 
