@@ -1,4 +1,4 @@
-"""Per-user message queue management for ordered message delivery.
+"""Topic-aware message queue management for ordered Telegram delivery.
 
 Provides a queue-based message processing system that ensures:
   - Messages are sent in receive order (FIFO)
@@ -11,33 +11,39 @@ Rate limiting is handled globally by AIORateLimiter on the Application.
 
 Key components:
   - MessageTask: Dataclass representing a queued message task (with thread_id)
-  - get_or_create_queue: Get or create queue and worker for a user
-  - Message queue worker: Background task processing user's queue
+  - get_or_create_queue: Get or create queue/worker for a specific topic
+  - Message queue worker: Background task processing one topic queue
   - Content task processing with tool_use/tool_result handling
   - Status message tracking and conversion (keyed by (user_id, thread_id))
 """
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from telegram import Bot
 from telegram.constants import ChatAction
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from ..html_converter import convert_markdown, strip_sentinels
 from ..session import session_manager
-from ..terminal_parser import parse_status_line
+from ..terminal_parser import extract_active_interactive_content, parse_status_line
 from ..tmux_manager import tmux_manager
+from .interactive_ui import (
+    _build_interactive_keyboard,
+    clear_interactive_tracking,
+    set_interactive_mode,
+    set_interactive_msg_id,
+)
 from .message_sender import NO_LINK_PREVIEW, PARSE_MODE, send_photo, send_with_fallback
 
 logger = logging.getLogger(__name__)
 
 # HTML tags that indicate text is already converted
 _HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
-
 
 def _is_already_html(text: str) -> bool:
     """Check if text already contains Telegram HTML formatting."""
@@ -59,7 +65,14 @@ MERGE_MAX_LENGTH = 3800  # Leave room for markdown conversion overhead
 class MessageTask:
     """Message task for queue processing."""
 
-    task_type: Literal["content", "status_update", "status_clear"]
+    task_type: Literal[
+        "content",
+        "status_update",
+        "status_clear",
+        "pane_probe",
+        "interactive_probe",  # Backward-compatible alias for pane_probe
+        "interactive_clear",
+    ]
     text: str | None = None
     window_id: str | None = None
     # content type fields
@@ -68,12 +81,17 @@ class MessageTask:
     content_type: str = "text"
     thread_id: int | None = None  # Telegram topic thread_id for targeted send
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
+    source: str | None = None  # Probe source for diagnostics (poller/callback/tool_use)
+    allow_status: bool = True  # For pane_probe: whether statusline sync is allowed
+    completion_fut: asyncio.Future[None] | None = None  # Strict delivery ack
 
 
-# Per-user message queues and worker tasks
-_message_queues: dict[int, asyncio.Queue[MessageTask]] = {}
-_queue_workers: dict[int, asyncio.Task[None]] = {}
-_queue_locks: dict[int, asyncio.Lock] = {}  # Protect drain/refill operations
+QueueKey: TypeAlias = tuple[int, int]  # (user_id, thread_id_or_0)
+
+# Per-topic message queues and worker tasks
+_message_queues: dict[QueueKey, asyncio.Queue[MessageTask]] = {}
+_queue_workers: dict[QueueKey, asyncio.Task[None]] = {}
+_queue_locks: dict[QueueKey, asyncio.Lock] = {}  # Protect drain/refill operations
 
 # Map (tool_use_id, user_id, thread_id_or_0) -> telegram message_id
 # for editing tool_use messages with results
@@ -82,28 +100,61 @@ _tool_msg_ids: dict[tuple[str, int, int], int] = {}
 # Status message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 
-# Flood control: user_id -> monotonic time when ban expires
-_flood_until: dict[int, float] = {}
+# Interactive UI render tracking:
+# (user_id, thread_id_or_0) -> (message_id, window_id, fingerprint)
+_interactive_render_state: dict[tuple[int, int], tuple[int, str, str]] = {}
+
+# Coalescing key for queued pane probes:
+# (user_id, thread_id_or_0, window_id)
+_pane_probe_pending: set[tuple[int, int, str]] = set()
+# Backward-compatible alias name.
+_interactive_probe_pending = _pane_probe_pending
+
+# Flood control: queue key -> monotonic time when ban expires
+_flood_until: dict[QueueKey, float] = {}
 
 # Max seconds to wait for flood control before dropping tasks
 FLOOD_CONTROL_MAX_WAIT = 10
 
+# Lightweight debug counters for observability.
+_debug_counters: dict[str, int] = {
+    "probe_enqueued": 0,
+    "probe_coalesced": 0,
+    "interactive_noop": 0,
+    "interactive_send": 0,
+    "interactive_edit": 0,
+    "duplicate_suppressed": 0,
+}
 
-def get_message_queue(user_id: int) -> asyncio.Queue[MessageTask] | None:
-    """Get the message queue for a user (if exists)."""
-    return _message_queues.get(user_id)
+
+def _inc_counter(name: str) -> None:
+    _debug_counters[name] = _debug_counters.get(name, 0) + 1
 
 
-def get_or_create_queue(bot: Bot, user_id: int) -> asyncio.Queue[MessageTask]:
-    """Get or create message queue and worker for a user."""
-    if user_id not in _message_queues:
-        _message_queues[user_id] = asyncio.Queue()
-        _queue_locks[user_id] = asyncio.Lock()
-        # Start worker task for this user
-        _queue_workers[user_id] = asyncio.create_task(
-            _message_queue_worker(bot, user_id)
-        )
-    return _message_queues[user_id]
+def _queue_key(user_id: int, thread_id: int | None = None) -> QueueKey:
+    return (user_id, thread_id or 0)
+
+
+def get_message_queue(
+    user_id: int,
+    thread_id: int | None = None,
+) -> asyncio.Queue[MessageTask] | None:
+    """Get queue for a specific topic (if it exists)."""
+    return _message_queues.get(_queue_key(user_id, thread_id))
+
+
+def get_or_create_queue(
+    bot: Bot,
+    user_id: int,
+    thread_id: int | None = None,
+) -> asyncio.Queue[MessageTask]:
+    """Get or create queue and worker for a specific topic."""
+    key = _queue_key(user_id, thread_id)
+    if key not in _message_queues:
+        _message_queues[key] = asyncio.Queue()
+        _queue_locks[key] = asyncio.Lock()
+        _queue_workers[key] = asyncio.create_task(_message_queue_worker(bot, key))
+    return _message_queues[key]
 
 
 def _inspect_queue(queue: asyncio.Queue[MessageTask]) -> list[MessageTask]:
@@ -125,7 +176,12 @@ def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
     """Check if two content tasks can be merged."""
     if base.window_id != candidate.window_id:
         return False
+    if base.thread_id != candidate.thread_id:
+        return False
     if candidate.task_type != "content":
+        return False
+    # Strict delivery tasks must preserve one-task-per-event acknowledgements.
+    if base.completion_fut is not None or candidate.completion_fut is not None:
         return False
     # tool_use/tool_result break merge chain
     # - tool_use: will be edited later by tool_result
@@ -201,18 +257,24 @@ async def _merge_content_tasks(
     )
 
 
-async def _message_queue_worker(bot: Bot, user_id: int) -> None:
-    """Process message tasks for a user sequentially."""
-    queue = _message_queues[user_id]
-    lock = _queue_locks[user_id]
-    logger.info(f"Message queue worker started for user {user_id}")
+async def _message_queue_worker(bot: Bot, key: QueueKey) -> None:
+    """Process message tasks for one topic sequentially."""
+    user_id, tid = key
+    queue = _message_queues[key]
+    lock = _queue_locks[key]
+    logger.info(
+        "Message queue worker started (user=%d, thread=%s)",
+        user_id,
+        tid,
+    )
 
     while True:
         try:
             task = await queue.get()
+            task_error: Exception | None = None
             try:
                 # Flood control: drop status, wait for content
-                flood_end = _flood_until.get(user_id, 0)
+                flood_end = _flood_until.get(key, 0)
                 if flood_end > 0:
                     remaining = flood_end - time.monotonic()
                     if remaining > 0:
@@ -227,8 +289,22 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                         )
                         await asyncio.sleep(remaining)
                     # Ban expired
-                    _flood_until.pop(user_id, None)
-                    logger.info("Flood control lifted for user %d", user_id)
+                    _flood_until.pop(key, None)
+                    logger.info(
+                        "Flood control lifted (user=%d, thread=%s)",
+                        user_id,
+                        tid,
+                    )
+
+                logger.debug(
+                    "Queue task start: task_type=%s source=%s user=%d thread=%s window=%s qsize=%d",
+                    task.task_type,
+                    task.source or "",
+                    user_id,
+                    tid,
+                    task.window_id or "",
+                    queue.qsize(),
+                )
 
                 if task.task_type == "content":
                     # Try to merge consecutive content tasks
@@ -245,36 +321,69 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _process_status_update_task(bot, user_id, task)
                 elif task.task_type == "status_clear":
                     await _do_clear_status_message(bot, user_id, task.thread_id or 0)
+                elif task.task_type in ("pane_probe", "interactive_probe"):
+                    try:
+                        await _process_pane_probe_task(bot, user_id, task)
+                    finally:
+                        task_tid = task.thread_id or 0
+                        wid = task.window_id or ""
+                        if wid:
+                            _pane_probe_pending.discard((user_id, task_tid, wid))
+                elif task.task_type == "interactive_clear":
+                    await _clear_interactive_render(bot, user_id, task.thread_id or 0)
             except RetryAfter as e:
+                task_error = e
                 retry_secs = (
                     e.retry_after
                     if isinstance(e.retry_after, int)
                     else int(e.retry_after.total_seconds())
                 )
                 if retry_secs > FLOOD_CONTROL_MAX_WAIT:
-                    _flood_until[user_id] = time.monotonic() + retry_secs
+                    _flood_until[key] = time.monotonic() + retry_secs
                     logger.warning(
-                        "Flood control for user %d: retry_after=%ds, "
+                        "Flood control for user %d thread %s: retry_after=%ds, "
                         "pausing queue until ban expires",
                         user_id,
+                        tid,
                         retry_secs,
                     )
                 else:
                     logger.warning(
-                        "Flood control for user %d: waiting %ds",
+                        "Flood control for user %d thread %s: waiting %ds",
                         user_id,
+                        tid,
                         retry_secs,
                     )
                     await asyncio.sleep(retry_secs)
             except Exception as e:
-                logger.error(f"Error processing message task for user {user_id}: {e}")
+                task_error = e
+                logger.error(
+                    "Error processing message task (user=%d, thread=%s): %s",
+                    user_id,
+                    tid,
+                    e,
+                )
             finally:
+                if task.completion_fut and not task.completion_fut.done():
+                    if task_error is None:
+                        task.completion_fut.set_result(None)
+                    else:
+                        task.completion_fut.set_exception(task_error)
                 queue.task_done()
         except asyncio.CancelledError:
-            logger.info(f"Message queue worker cancelled for user {user_id}")
+            logger.info(
+                "Message queue worker cancelled (user=%d, thread=%s)",
+                user_id,
+                tid,
+            )
             break
         except Exception as e:
-            logger.error(f"Unexpected error in queue worker for user {user_id}: {e}")
+            logger.error(
+                "Unexpected error in queue worker (user=%d, thread=%s): %s",
+                user_id,
+                tid,
+                e,
+            )
 
 
 def _send_kwargs(thread_id: int | None) -> dict[str, int]:
@@ -299,6 +408,216 @@ async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> None:
         task.image_data,
         **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
     )
+
+
+def _interactive_fingerprint(window_id: str, ui_name: str, text: str) -> str:
+    """Build a stable fingerprint for interactive UI deduplication."""
+    payload = f"{window_id}\n{ui_name}\n{text.strip()}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+async def _clear_interactive_render(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int,
+) -> None:
+    """Delete currently tracked interactive UI message (if any)."""
+    ikey = (user_id, thread_id_or_0)
+    state = _interactive_render_state.pop(ikey, None)
+    if not state:
+        clear_interactive_tracking(user_id, thread_id_or_0 or None)
+        return
+
+    msg_id, _, _ = state
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    except Exception:
+        pass
+    clear_interactive_tracking(user_id, thread_id_or_0 or None)
+
+
+async def _process_pane_probe_task(
+    bot: Bot,
+    user_id: int,
+    task: MessageTask,
+) -> bool:
+    """Synchronize interactive UI/status from a single pane capture.
+
+    Returns True when an interactive UI is visible after processing.
+    """
+    tid = task.thread_id or 0
+    thread_id = task.thread_id
+    wid = task.window_id or ""
+    source = task.source or "unknown"
+    allow_status = task.allow_status
+    if not wid:
+        return False
+
+    w = await tmux_manager.find_window_by_id(wid)
+    if not w:
+        await _clear_interactive_render(bot, user_id, tid)
+        if allow_status:
+            await _do_clear_status_message(bot, user_id, tid)
+        logger.debug(
+            "Interactive probe clear: source=%s user=%d thread=%s window=%s reason=window_missing",
+            source,
+            user_id,
+            thread_id,
+            wid,
+        )
+        return False
+
+    pane_text = await tmux_manager.capture_pane(w.window_id)
+    if not pane_text:
+        return False
+
+    content = extract_active_interactive_content(pane_text)
+    if not content:
+        await _clear_interactive_render(bot, user_id, tid)
+        if allow_status:
+            status_line = parse_status_line(pane_text)
+            if status_line:
+                await _process_status_update_task(
+                    bot,
+                    user_id,
+                    MessageTask(
+                        task_type="status_update",
+                        text=status_line,
+                        window_id=wid,
+                        thread_id=thread_id,
+                        source=source,
+                    ),
+                )
+        logger.debug(
+            "Interactive probe clear: source=%s user=%d thread=%s window=%s reason=ui_absent",
+            source,
+            user_id,
+            thread_id,
+            wid,
+        )
+        return False
+
+    text = content.content.strip()
+    fp = _interactive_fingerprint(wid, content.name, text)
+    ikey = (user_id, tid)
+    current = _interactive_render_state.get(ikey)
+
+    if current and current[1] == wid and current[2] == fp:
+        _inc_counter("interactive_noop")
+        logger.debug(
+            "Interactive probe noop: source=%s user=%d thread=%s window=%s fp=%s",
+            source,
+            user_id,
+            thread_id,
+            wid,
+            fp[:8],
+        )
+        return True
+
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    await _do_clear_status_message(bot, user_id, tid)
+    keyboard = _build_interactive_keyboard(wid, ui_name=content.name)
+    thread_kwargs = _send_kwargs(thread_id)
+
+    # Window switched in same thread: delete stale interactive message first.
+    if current and current[1] != wid:
+        await _clear_interactive_render(bot, user_id, tid)
+        current = None
+
+    if current:
+        msg_id = current[0]
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=keyboard,
+                link_preview_options=NO_LINK_PREVIEW,
+            )
+            _interactive_render_state[ikey] = (msg_id, wid, fp)
+            set_interactive_mode(user_id, wid, thread_id)
+            set_interactive_msg_id(user_id, msg_id, thread_id)
+            _inc_counter("interactive_edit")
+            logger.debug(
+                "Interactive probe edit: source=%s user=%d thread=%s window=%s fp=%s",
+                source,
+                user_id,
+                thread_id,
+                wid,
+                fp[:8],
+            )
+            return True
+        except RetryAfter:
+            raise
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                _interactive_render_state[ikey] = (msg_id, wid, fp)
+                set_interactive_mode(user_id, wid, thread_id)
+                set_interactive_msg_id(user_id, msg_id, thread_id)
+                _inc_counter("interactive_noop")
+                logger.debug(
+                    "Interactive probe noop-edit: source=%s user=%d thread=%s window=%s fp=%s",
+                    source,
+                    user_id,
+                    thread_id,
+                    wid,
+                    fp[:8],
+                )
+                return True
+            logger.debug(
+                "Interactive probe edit failed: source=%s user=%d thread=%s window=%s error=%s",
+                source,
+                user_id,
+                thread_id,
+                wid,
+                e,
+            )
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(
+                "Interactive probe edit failed: source=%s user=%d thread=%s window=%s error=%s",
+                source,
+                user_id,
+                thread_id,
+                wid,
+                e,
+            )
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=keyboard,
+        link_preview_options=NO_LINK_PREVIEW,
+        **thread_kwargs,  # type: ignore[arg-type]
+    )
+    if not sent:
+        return False
+
+    _interactive_render_state[ikey] = (sent.message_id, wid, fp)
+    set_interactive_mode(user_id, wid, thread_id)
+    set_interactive_msg_id(user_id, sent.message_id, thread_id)
+    _inc_counter("interactive_send")
+    logger.debug(
+        "Interactive probe send: source=%s user=%d thread=%s window=%s fp=%s",
+        source,
+        user_id,
+        thread_id,
+        wid,
+        fp[:8],
+    )
+    return True
+
+
+# Backward-compatible alias for older tests/callers.
+_process_interactive_probe_task = _process_pane_probe_task
 
 
 async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> None:
@@ -381,6 +700,25 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     # 3. Record tool_use message ID for later editing
     if last_msg_id and task.tool_use_id and task.content_type == "tool_use":
         _tool_msg_ids[(task.tool_use_id, user_id, tid)] = last_msg_id
+
+    # 3.5 Probe interactive UI right after tool_use to preserve ordering.
+    # Run inside the same worker task so it cannot race with poller callbacks.
+    if task.content_type == "tool_use" and task.window_id:
+        ui_visible = await _process_pane_probe_task(
+            bot,
+            user_id,
+            MessageTask(
+                task_type="pane_probe",
+                window_id=task.window_id,
+                thread_id=task.thread_id,
+                source="tool_use",
+                allow_status=False,
+            ),
+        )
+        if ui_visible:
+            # Send images and return - don't send status after UI
+            await _send_task_images(bot, chat_id, task)
+            return
 
     # 4. Send images if present (from tool_result with base64 image blocks)
     await _send_task_images(bot, chat_id, task)
@@ -578,21 +916,20 @@ async def _check_and_send_status(
 ) -> None:
     """Check terminal for status line and send status message if present."""
     # Skip if there are more messages pending in the queue
-    queue = _message_queues.get(user_id)
+    queue = get_message_queue(user_id, thread_id)
     if queue and not queue.empty():
         return
-    w = await tmux_manager.find_window_by_id(window_id)
-    if not w:
-        return
-
-    pane_text = await tmux_manager.capture_pane(w.window_id)
-    if not pane_text:
-        return
-
-    tid = thread_id or 0
-    status_line = parse_status_line(pane_text)
-    if status_line:
-        await _do_send_status_message(bot, user_id, tid, window_id, status_line)
+    await _process_pane_probe_task(
+        bot,
+        user_id,
+        MessageTask(
+            task_type="pane_probe",
+            window_id=window_id,
+            thread_id=thread_id,
+            source="status_check",
+            allow_status=True,
+        ),
+    )
 
 
 async def enqueue_content_message(
@@ -605,15 +942,20 @@ async def enqueue_content_message(
     text: str | None = None,
     thread_id: int | None = None,
     image_data: list[tuple[str, bytes]] | None = None,
+    wait_for_delivery: bool = False,
 ) -> None:
     """Enqueue a content message task."""
     logger.debug(
-        "Enqueue content: user=%d, window_id=%s, content_type=%s",
+        "Enqueue content: user=%d thread=%s window_id=%s content_type=%s",
         user_id,
+        thread_id,
         window_id,
         content_type,
     )
-    queue = get_or_create_queue(bot, user_id)
+    queue = get_or_create_queue(bot, user_id, thread_id)
+    completion_fut: asyncio.Future[None] | None = None
+    if wait_for_delivery:
+        completion_fut = asyncio.get_running_loop().create_future()
 
     task = MessageTask(
         task_type="content",
@@ -624,8 +966,12 @@ async def enqueue_content_message(
         content_type=content_type,
         thread_id=thread_id,
         image_data=image_data,
+        source="monitor",
+        completion_fut=completion_fut,
     )
     queue.put_nowait(task)
+    if completion_fut:
+        await completion_fut
 
 
 async def enqueue_status_update(
@@ -637,7 +983,8 @@ async def enqueue_status_update(
 ) -> None:
     """Enqueue status update. Skipped if text unchanged or during flood control."""
     # Don't enqueue during flood control — they'd just be dropped
-    flood_end = _flood_until.get(user_id, 0)
+    key = _queue_key(user_id, thread_id)
+    flood_end = _flood_until.get(key, 0)
     if flood_end > time.monotonic():
         return
 
@@ -650,7 +997,7 @@ async def enqueue_status_update(
         if info and info[1] == window_id and info[2] == status_text:
             return
 
-    queue = get_or_create_queue(bot, user_id)
+    queue = get_or_create_queue(bot, user_id, thread_id)
 
     if status_text:
         task = MessageTask(
@@ -658,17 +1005,100 @@ async def enqueue_status_update(
             text=status_text,
             window_id=window_id,
             thread_id=thread_id,
+            source="status",
         )
     else:
-        task = MessageTask(task_type="status_clear", thread_id=thread_id)
+        task = MessageTask(task_type="status_clear", thread_id=thread_id, source="status")
 
     queue.put_nowait(task)
+
+
+async def enqueue_pane_probe(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None = None,
+    source: str = "",
+    allow_status: bool = True,
+) -> None:
+    """Enqueue pane probe with lightweight coalescing."""
+    tid = thread_id or 0
+    pkey = (user_id, tid, window_id)
+    if pkey in _pane_probe_pending:
+        _inc_counter("probe_coalesced")
+        _inc_counter("duplicate_suppressed")
+        logger.debug(
+            "Pane probe coalesced: source=%s user=%d thread=%s window=%s",
+            source or "",
+            user_id,
+            thread_id,
+            window_id,
+        )
+        return
+
+    _inc_counter("probe_enqueued")
+    _pane_probe_pending.add(pkey)
+    queue = get_or_create_queue(bot, user_id, thread_id)
+    queue.put_nowait(
+        MessageTask(
+            task_type="pane_probe",
+            window_id=window_id,
+            thread_id=thread_id,
+            source=source or "manual",
+            allow_status=allow_status,
+        )
+    )
+
+
+async def enqueue_interactive_clear(
+    bot: Bot,
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Enqueue interactive UI clear task."""
+    queue = get_or_create_queue(bot, user_id, thread_id)
+    queue.put_nowait(
+        MessageTask(task_type="interactive_clear", thread_id=thread_id, source="manual")
+    )
+
+
+async def enqueue_interactive_probe(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None = None,
+    source: str = "",
+) -> None:
+    """Backward-compatible alias for enqueue_pane_probe."""
+    await enqueue_pane_probe(
+        bot=bot,
+        user_id=user_id,
+        window_id=window_id,
+        thread_id=thread_id,
+        source=source,
+        allow_status=True,
+    )
 
 
 def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
     """Clear status message tracking for a user (and optionally a specific thread)."""
     skey = (user_id, thread_id or 0)
     _status_msg_info.pop(skey, None)
+
+
+def clear_interactive_render_state(user_id: int, thread_id: int | None = None) -> None:
+    """Clear interactive render tracking for a user/topic."""
+    tid = thread_id or 0
+    _interactive_render_state.pop((user_id, tid), None)
+    clear_interactive_tracking(user_id, thread_id)
+    # Drop pending probes for this user/thread to avoid stale re-renders.
+    keys_to_remove = [
+        key
+        for key in _pane_probe_pending
+        if key[0] == user_id and (thread_id is None or key[1] == tid)
+    ]
+    for key in keys_to_remove:
+        _pane_probe_pending.discard(key)
 
 
 def clear_tool_msg_ids_for_topic(user_id: int, thread_id: int | None = None) -> None:
@@ -696,4 +1126,6 @@ async def shutdown_workers() -> None:
     _queue_workers.clear()
     _message_queues.clear()
     _queue_locks.clear()
+    _interactive_render_state.clear()
+    _pane_probe_pending.clear()
     logger.info("Message queue workers stopped")

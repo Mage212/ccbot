@@ -94,20 +94,11 @@ from .handlers.directory_browser import (
 )
 from .handlers.cleanup import clear_topic_state
 from .handlers.history import send_history
-from .handlers.interactive_ui import (
-    INTERACTIVE_TOOL_NAMES,
-    clear_interactive_mode,
-    clear_interactive_msg,
-    get_interactive_msg_id,
-    get_interactive_window,
-    handle_interactive_ui,
-    set_interactive_mode,
-)
 from .handlers.message_queue import (
     clear_status_msg_info,
     enqueue_content_message,
+    enqueue_pane_probe,
     enqueue_status_update,
-    get_message_queue,
     shutdown_workers,
 )
 from .handlers.message_sender import (
@@ -123,7 +114,7 @@ from .handlers.status_polling import status_poll_loop
 from .screenshot import text_to_image
 from .session import session_manager
 from .session_monitor import NewMessage, SessionMonitor
-from .terminal_parser import extract_bash_output, is_interactive_ui
+from .terminal_parser import extract_bash_output
 from .tmux_manager import tmux_manager
 from .utils import ccbot_dir
 
@@ -807,20 +798,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Cancel any running bash capture — new message pushes pane content down
     _cancel_bash_capture(user.id, thread_id)
 
-    # Check for pending interactive UI before sending text.
-    # This catches UIs (permission prompts, etc.) that status polling might have missed.
-    pane_text = await tmux_manager.capture_pane(w.window_id)
-    if pane_text and is_interactive_ui(pane_text):
-        # UI detected — show it to user, then send text (acts as Enter)
-        logger.info(
-            "Detected pending interactive UI before sending text (user=%d, thread=%s)",
-            user.id,
-            thread_id,
-        )
-        await handle_interactive_ui(context.bot, user.id, wid, thread_id)
-        # Small delay to let UI render in Telegram before text arrives
-        await asyncio.sleep(0.3)
-
     success, message = await session_manager.send_to_window(wid, text)
     if not success:
         await safe_reply(update.message, f"❌ {message}")
@@ -834,11 +811,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         _bash_capture_tasks[(user.id, thread_id)] = task
 
-    # If in interactive mode, refresh the UI after sending text
-    interactive_window = get_interactive_window(user.id, thread_id)
-    if interactive_window and interactive_window == wid:
-        await asyncio.sleep(0.2)
-        await handle_interactive_ui(context.bot, user.id, wid, thread_id)
+    # Queue-driven interactive refresh after user input (single writer path).
+    await enqueue_pane_probe(
+        context.bot,
+        user.id,
+        wid,
+        thread_id=thread_id,
+        source="message_send",
+    )
 
 
 # --- Callback query handler ---
@@ -1273,7 +1253,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if w:
             await tmux_manager.send_keys(w.window_id, "Up", enter=False, literal=False)
             await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+            await enqueue_pane_probe(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id=thread_id,
+                source="callback:up",
+            )
         await query.answer()
 
     # Interactive UI: Down arrow
@@ -1286,7 +1272,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 w.window_id, "Down", enter=False, literal=False
             )
             await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+            await enqueue_pane_probe(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id=thread_id,
+                source="callback:down",
+            )
         await query.answer()
 
     # Interactive UI: Left arrow
@@ -1299,7 +1291,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 w.window_id, "Left", enter=False, literal=False
             )
             await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+            await enqueue_pane_probe(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id=thread_id,
+                source="callback:left",
+            )
         await query.answer()
 
     # Interactive UI: Right arrow
@@ -1312,7 +1310,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 w.window_id, "Right", enter=False, literal=False
             )
             await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+            await enqueue_pane_probe(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id=thread_id,
+                source="callback:right",
+            )
         await query.answer()
 
     # Interactive UI: Escape
@@ -1324,7 +1328,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await tmux_manager.send_keys(
                 w.window_id, "Escape", enter=False, literal=False
             )
-            await clear_interactive_msg(user.id, context.bot, thread_id)
+            await asyncio.sleep(0.5)
+            await enqueue_pane_probe(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id=thread_id,
+                source="callback:esc",
+            )
         await query.answer("⎋ Esc")
 
     # Interactive UI: Enter
@@ -1337,7 +1348,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 w.window_id, "Enter", enter=False, literal=False
             )
             await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+            await enqueue_pane_probe(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id=thread_id,
+                source="callback:enter",
+            )
         await query.answer("⏎ Enter")
 
     # Interactive UI: Space
@@ -1350,7 +1367,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 w.window_id, "Space", enter=False, literal=False
             )
             await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+            await enqueue_pane_probe(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id=thread_id,
+                source="callback:space",
+            )
         await query.answer("␣ Space")
 
     # Interactive UI: Tab
@@ -1361,14 +1384,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if w:
             await tmux_manager.send_keys(w.window_id, "Tab", enter=False, literal=False)
             await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+            await enqueue_pane_probe(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id=thread_id,
+                source="callback:tab",
+            )
         await query.answer("⇥ Tab")
 
     # Interactive UI: refresh display
     elif data.startswith(CB_ASK_REFRESH):
         window_id = data[len(CB_ASK_REFRESH) :]
         thread_id = _get_thread_id(update)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await enqueue_pane_probe(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id=thread_id,
+            source="callback:refresh",
+        )
         await query.answer("🔄")
 
     # Screenshot quick keys: send key to tmux window
@@ -1438,36 +1473,9 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         return
 
     for user_id, wid, thread_id in active_users:
-        # Handle interactive tools specially - capture terminal and send UI
-        if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
-            # Mark interactive mode BEFORE sleeping so polling skips this window
-            set_interactive_mode(user_id, wid, thread_id)
-            # Flush pending messages (e.g. plan content) before sending interactive UI
-            queue = get_message_queue(user_id)
-            if queue:
-                await queue.join()
-            # Wait briefly for Claude Code to render the question UI
-            await asyncio.sleep(0.3)
-            handled = await handle_interactive_ui(bot, user_id, wid, thread_id)
-            if handled:
-                # Update user's read offset
-                session = await session_manager.resolve_session_for_window(wid)
-                if session and session.file_path:
-                    try:
-                        file_size = Path(session.file_path).stat().st_size
-                        session_manager.update_user_window_offset(
-                            user_id, wid, file_size
-                        )
-                    except OSError:
-                        pass
-                continue  # Don't send the normal tool_use message
-            else:
-                # UI not rendered — clear the early-set mode
-                clear_interactive_mode(user_id, thread_id)
-
-        # Any non-interactive message means the interaction is complete — delete the UI message
-        if get_interactive_msg_id(user_id, thread_id):
-            await clear_interactive_msg(user_id, bot, thread_id)
+        # Interactive UI detection is handled by status_polling which monitors
+        # the terminal and sends UI when visible. This ensures proper message
+        # ordering - tool_use summary appears before the interactive UI.
 
         parts = build_response_parts(
             msg.text,
@@ -1490,6 +1498,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 text=msg.text,
                 thread_id=thread_id,
                 image_data=msg.image_data,
+                wait_for_delivery=True,
             )
 
             # Update user's read offset to current file position

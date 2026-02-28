@@ -3,6 +3,7 @@
 import pytest
 
 from ccbot.terminal_parser import (
+    extract_active_interactive_content,
     extract_bash_output,
     extract_interactive_content,
     is_interactive_ui,
@@ -61,6 +62,16 @@ class TestParseStatusLine:
 
     def test_uses_fixture(self, sample_pane_status_line: str):
         assert parse_status_line(sample_pane_status_line) == "Reading file src/main.py"
+
+    def test_thinking_marker_ignored(self, chrome: str):
+        """Thinking lines (∴ prefix) must be ignored - they come from JSONL."""
+        pane = f"output\n· ∴ Thinking… Analyzing code\n{chrome}"
+        assert parse_status_line(pane) is None
+
+    def test_thinking_marker_with_multiline_ignored(self, chrome: str):
+        """Multi-line thinking must also be ignored."""
+        pane = f"· ∴ Thinking… Checking files\nNo markdown found.\n{chrome}"
+        assert parse_status_line(pane) is None
 
 
 # ── extract_interactive_content ──────────────────────────────────────────
@@ -158,6 +169,39 @@ class TestExtractInteractiveContent:
         assert result is not None
         assert result.name == "Settings"
         assert "Enter to confirm" in result.content
+
+    def test_selects_last_permission_prompt_as_active(self):
+        pane = (
+            "  Do you want to proceed?\n"
+            "   ❯ 1. Yes\n"
+            "     2. Yes, and don’t ask again for: uv run mypy src/ --ignore-missing-imports 2>&1\n"
+            "     3. No\n"
+            "  Esc to cancel · Tab to amend\n"
+            "\n"
+            "  Do you want to proceed?\n"
+            "   ❯ 1. Yes\n"
+            "     2. Yes, and don’t ask again for: uv run ruff check src/corpclaw/skills/ 2>&1\n"
+            "     3. No\n"
+            "  Esc to cancel · Tab to amend\n"
+        )
+        result = extract_active_interactive_content(pane)
+        assert result is not None
+        assert "ruff check" in result.content
+        assert "mypy src/" not in result.content
+
+    def test_bash_parenthesized_header_detected(self):
+        pane = (
+            "  Bash(uv run mypy src/ --ignore-missing-imports 2>&1)\n"
+            "  Do you want to proceed?\n"
+            "   ❯ 1. Yes\n"
+            "     2. Yes, and don’t ask again for: uv run mypy src/ --ignore-missing-imports 2>&1\n"
+            "     3. No\n"
+            "  Esc to cancel · Tab to amend\n"
+        )
+        result = extract_active_interactive_content(pane)
+        assert result is not None
+        assert result.name in ("PermissionPrompt", "BashApproval")
+        assert "1. Yes" in result.content
 
     @pytest.mark.parametrize(
         "pane",

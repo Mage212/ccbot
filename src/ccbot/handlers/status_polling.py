@@ -24,15 +24,13 @@ from telegram import Bot
 from telegram.error import BadRequest
 
 from ..session import session_manager
-from ..terminal_parser import is_interactive_ui, parse_status_line
 from ..tmux_manager import tmux_manager
-from .interactive_ui import (
-    clear_interactive_msg,
-    get_interactive_window,
-    handle_interactive_ui,
-)
 from .cleanup import clear_topic_state
-from .message_queue import enqueue_status_update, get_message_queue
+from .message_queue import (
+    enqueue_pane_probe,
+    enqueue_status_update,
+    get_message_queue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,55 +66,16 @@ async def update_status_message(
             )
         return
 
-    pane_text = await tmux_manager.capture_pane(w.window_id)
-    if not pane_text:
-        # Transient capture failure - keep existing status message
-        return
-
-    interactive_window = get_interactive_window(user_id, thread_id)
-    should_check_new_ui = True
-
-    if interactive_window == window_id:
-        # User is in interactive mode for THIS window
-        if is_interactive_ui(pane_text):
-            # Interactive UI still showing — skip status update (user is interacting)
-            return
-        # Interactive UI gone — clear interactive mode, fall through to status check.
-        # Don't re-check for new UI this cycle (the old one just disappeared).
-        await clear_interactive_msg(user_id, bot, thread_id)
-        should_check_new_ui = False
-    elif interactive_window is not None:
-        # User is in interactive mode for a DIFFERENT window (window switched)
-        # Clear stale interactive mode
-        await clear_interactive_msg(user_id, bot, thread_id)
-
-    # Check for permission prompt (interactive UI not triggered via JSONL)
-    # ALWAYS check UI, regardless of skip_status
-    if should_check_new_ui and is_interactive_ui(pane_text):
-        logger.debug(
-            "Interactive UI detected in polling (user=%d, window=%s, thread=%s)",
-            user_id,
-            window_id,
-            thread_id,
-        )
-        await handle_interactive_ui(bot, user_id, window_id, thread_id)
-        return
-
-    # Normal status line check — skip if queue is non-empty
-    if skip_status:
-        return
-
-    status_line = parse_status_line(pane_text)
-
-    if status_line:
-        await enqueue_status_update(
-            bot,
-            user_id,
-            window_id,
-            status_line,
-            thread_id=thread_id,
-        )
-    # If no status line, keep existing status message (don't clear on transient state)
+    # Single probe task handles UI rendering and optional statusline sync.
+    # capture_pane happens only inside the queue worker (single-writer path).
+    await enqueue_pane_probe(
+        bot,
+        user_id,
+        window_id,
+        thread_id=thread_id,
+        source="poller",
+        allow_status=not skip_status,
+    )
 
 
 async def status_poll_loop(bot: Bot) -> None:
@@ -183,7 +142,7 @@ async def status_poll_loop(bot: Bot) -> None:
                     # UI detection happens unconditionally in update_status_message.
                     # Status enqueue is skipped inside update_status_message when
                     # interactive UI is detected (returns early) or when queue is non-empty.
-                    queue = get_message_queue(user_id)
+                    queue = get_message_queue(user_id, thread_id)
                     skip_status = queue is not None and not queue.empty()
 
                     await update_status_message(

@@ -110,7 +110,7 @@ class TranscriptParser:
         return data.get("type") == "user"
 
     @staticmethod
-    def extract_text_only(content_list: list[Any]) -> str:
+    def extract_text_only(content_list: list[Any] | str | int) -> str:
         """Extract only text content from structured content.
 
         This is used for Telegram notifications where we only want
