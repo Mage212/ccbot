@@ -1,6 +1,7 @@
 # CCBot
 
 [中文文档](README_CN.md)
+[Русская документация](README_RU.md)
 
 Control Claude Code sessions remotely via Telegram — monitor, interact, and manage AI coding sessions running in tmux.
 
@@ -92,7 +93,9 @@ ALLOWED_USERS=your_telegram_user_id
 | `CLAUDE_COMMAND`        | `claude`   | Command to run in new windows                    |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
-| `CCBOT_USE_HTML_CONVERTER` | `false` | Use HTML formatting (better code block splitting) |
+
+Message formatting is always HTML via `chatgpt-md-converter` (`chatgpt_md_converter` package).
+There is no runtime formatter switch to MarkdownV2.
 
 > If running on a VPS where there's no interactive terminal to approve permissions, consider:
 >
@@ -205,6 +208,10 @@ The monitor polls session JSONL files every 2 seconds and sends notifications fo
 
 Notifications are delivered to the topic bound to the session's window.
 
+Formatting note:
+- Telegram messages are rendered with parse mode `HTML` using `chatgpt-md-converter`
+- Long messages are split with HTML tag awareness to preserve code blocks and formatting
+
 ## Running Claude Code in tmux
 
 ### Option 1: Create via Telegram (Recommended)
@@ -247,9 +254,7 @@ src/ccbot/
 ├── monitor_state.py       # Monitor state persistence (byte offsets)
 ├── transcript_parser.py   # Claude Code JSONL transcript parsing
 ├── terminal_parser.py     # Terminal pane parsing (interactive UI + status line)
-├── markdown_v2.py         # Markdown → Telegram MarkdownV2 conversion
-├── html_converter.py      # Markdown → HTML conversion (alternative formatter)
-├── telegram_sender.py     # Message splitting + synchronous HTTP send
+├── html_converter.py      # Markdown → Telegram HTML conversion + HTML-aware splitting
 ├── screenshot.py          # Terminal text → PNG image with ANSI color support
 ├── utils.py               # Shared utilities (atomic JSON writes, JSONL helpers)
 ├── tmux_manager.py        # Tmux window management (list, create, send keys, kill)

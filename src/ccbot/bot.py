@@ -95,15 +95,19 @@ from .handlers.directory_browser import (
 from .handlers.cleanup import clear_topic_state
 from .handlers.history import send_history
 from .handlers.interactive_ui import (
+    INTERACTIVE_TOOL_NAMES,
+    clear_interactive_mode,
     clear_interactive_msg,
     get_interactive_msg_id,
     get_interactive_window,
     handle_interactive_ui,
+    set_interactive_mode,
 )
 from .handlers.message_queue import (
     clear_status_msg_info,
     enqueue_content_message,
     enqueue_status_update,
+    get_message_queue,
     shutdown_workers,
 )
 from .handlers.message_sender import (
@@ -1434,9 +1438,32 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         return
 
     for user_id, wid, thread_id in active_users:
-        # Interactive UI detection is handled by status_polling which monitors
-        # the terminal and sends UI when visible. This ensures proper message
-        # ordering - tool_use summary appears before the interactive UI.
+        # Handle interactive tools specially - capture terminal and send UI
+        if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
+            # Mark interactive mode BEFORE sleeping so polling skips this window
+            set_interactive_mode(user_id, wid, thread_id)
+            # Flush pending messages (e.g. plan content) before sending interactive UI
+            queue = get_message_queue(user_id)
+            if queue:
+                await queue.join()
+            # Wait briefly for Claude Code to render the question UI
+            await asyncio.sleep(0.3)
+            handled = await handle_interactive_ui(bot, user_id, wid, thread_id)
+            if handled:
+                # Update user's read offset
+                session = await session_manager.resolve_session_for_window(wid)
+                if session and session.file_path:
+                    try:
+                        file_size = Path(session.file_path).stat().st_size
+                        session_manager.update_user_window_offset(
+                            user_id, wid, file_size
+                        )
+                    except OSError:
+                        pass
+                continue  # Don't send the normal tool_use message
+            else:
+                # UI not rendered — clear the early-set mode
+                clear_interactive_mode(user_id, thread_id)
 
         # Any non-interactive message means the interaction is complete — delete the UI message
         if get_interactive_msg_id(user_id, thread_id):

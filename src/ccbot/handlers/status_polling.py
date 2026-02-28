@@ -99,10 +99,6 @@ async def update_status_message(
             window_id,
             thread_id,
         )
-        # Wait for queue to drain before sending UI (preserves message order)
-        queue = get_message_queue(user_id)
-        if queue:
-            await queue.join()
         await handle_interactive_ui(bot, user_id, window_id, thread_id)
         return
 
