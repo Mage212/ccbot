@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -421,7 +422,10 @@ class TmuxManager:
                         cmd = config.claude_command
                         if resume_session_id:
                             cmd = f"{cmd} --resume {resume_session_id}"
-                        pane.send_keys(cmd, enter=True)
+                        # Force cwd before launching Claude to avoid inheriting
+                        # an unexpected project context in nested tmux setups.
+                        launch_cmd = f"cd {shlex.quote(str(path))} && {cmd}"
+                        pane.send_keys(launch_cmd, enter=True)
 
                 logger.info(
                     "Created window '%s' (id=%s) at %s",
