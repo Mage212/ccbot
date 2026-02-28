@@ -154,6 +154,11 @@ def _get_thread_id(update: Update) -> int | None:
     return tid
 
 
+def _default_browse_path() -> str:
+    """Default root for directory browser navigation."""
+    return str(Path.home())
+
+
 # --- Command handlers ---
 
 
@@ -762,7 +767,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user.id,
             thread_id,
         )
-        start_path = str(Path.cwd())
+        start_path = _default_browse_path()
         msg_text, keyboard, subdirs = build_directory_browser(start_path)
         if context.user_data is not None:
             context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
@@ -909,7 +914,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         subdir_name = cached_dirs[idx]
 
-        default_path = str(Path.cwd())
+        default_path = _default_browse_path()
         current_path = (
             context.user_data.get(BROWSE_PATH_KEY, default_path)
             if context.user_data
@@ -939,7 +944,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
-        default_path = str(Path.cwd())
+        default_path = _default_browse_path()
         current_path = (
             context.user_data.get(BROWSE_PATH_KEY, default_path)
             if context.user_data
@@ -972,7 +977,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except ValueError:
             await query.answer("Invalid data")
             return
-        default_path = str(Path.cwd())
+        default_path = _default_browse_path()
         current_path = (
             context.user_data.get(BROWSE_PATH_KEY, default_path)
             if context.user_data
@@ -988,7 +993,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.answer()
 
     elif data == CB_DIR_CONFIRM:
-        default_path = str(Path.cwd())
+        default_path = _default_browse_path()
         selected_path = (
             context.user_data.get(BROWSE_PATH_KEY, default_path)
             if context.user_data
@@ -1190,7 +1195,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         # Preserve pending thread info, clear only picker state
         clear_window_picker_state(context.user_data)
-        start_path = str(Path.cwd())
+        start_path = _default_browse_path()
         msg_text, keyboard, subdirs = build_directory_browser(start_path)
         if context.user_data is not None:
             context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
