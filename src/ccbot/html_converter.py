@@ -92,15 +92,14 @@ def split_message(text: str, max_length: int = 4096) -> list[str]:
     """Split text into Telegram-compatible HTML chunks.
 
     Drop-in replacement for telegram_sender.split_message().
-    IMPORTANT: Always converts to HTML first, then splits with tag awareness.
-    This ensures code blocks and other HTML structures are preserved.
+    IMPORTANT: Always converts to HTML first, then checks length and splits.
+    Raw markdown length can differ greatly from HTML length (e.g. bold/code
+    tags, expandable quotes), so length must be checked after conversion.
     """
-    if len(text) <= max_length:
-        # Still need to convert to HTML for consistency
-        return [_convert_to_html(text)]
-
-    # Convert to HTML first (handles sentinels + markdown)
     html_text = _convert_to_html(text)
+
+    if len(html_text) <= max_length:
+        return [html_text]
 
     return split_html_for_telegram(
         html_text, max_length=max_length, trim_empty_leading_lines=True
