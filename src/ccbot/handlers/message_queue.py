@@ -29,9 +29,8 @@ from telegram.error import RetryAfter
 
 from ..html_converter import convert_markdown, strip_sentinels
 from ..session import session_manager
-from ..terminal_parser import is_interactive_ui, parse_status_line
+from ..terminal_parser import parse_status_line
 from ..tmux_manager import tmux_manager
-from .interactive_ui import handle_interactive_ui
 from .message_sender import NO_LINK_PREVIEW, PARSE_MODE, send_photo, send_with_fallback
 
 logger = logging.getLogger(__name__)
@@ -382,20 +381,6 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     # 3. Record tool_use message ID for later editing
     if last_msg_id and task.tool_use_id and task.content_type == "tool_use":
         _tool_msg_ids[(task.tool_use_id, user_id, tid)] = last_msg_id
-
-    # 3.5 Check for interactive UI after tool_use (ensures UI appears after message)
-    if task.content_type == "tool_use" and task.window_id:
-        w = await tmux_manager.find_window_by_id(task.window_id)
-        if w:
-            pane_text = await tmux_manager.capture_pane(w.window_id)
-            if pane_text and is_interactive_ui(pane_text):
-                # UI detected - send it now (after tool_use message)
-                await handle_interactive_ui(
-                    bot, user_id, task.window_id, task.thread_id
-                )
-                # Send images and return - don't send status after UI
-                await _send_task_images(bot, chat_id, task)
-                return
 
     # 4. Send images if present (from tool_result with base64 image blocks)
     await _send_task_images(bot, chat_id, task)
