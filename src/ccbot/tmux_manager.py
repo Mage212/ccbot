@@ -93,6 +93,24 @@ class TmuxManager:
             except Exception:
                 pass  # var not set in session env — nothing to remove
 
+    def _build_claude_launch_command(
+        self, path: Path, resume_session_id: str | None = None
+    ) -> str:
+        """Build shell command to launch Claude in a clean project context.
+
+        `uv run ccbot` exports VIRTUAL_ENV and UV_* variables from the bot's
+        own project. Unset them so `uv` calls inside Claude resolve against
+        the selected directory, not the bot workspace.
+        """
+        cmd = config.claude_command
+        if resume_session_id:
+            cmd = f"{cmd} --resume {resume_session_id}"
+        return (
+            f"cd {shlex.quote(str(path))} && "
+            "unset VIRTUAL_ENV UV_PROJECT UV_WORKING_DIRECTORY && "
+            f"{cmd}"
+        )
+
     async def list_windows(self) -> list[TmuxWindow]:
         """List all windows in the session with their working directories.
 
@@ -419,12 +437,9 @@ class TmuxManager:
                 if start_claude:
                     pane = window.active_pane
                     if pane:
-                        cmd = config.claude_command
-                        if resume_session_id:
-                            cmd = f"{cmd} --resume {resume_session_id}"
-                        # Force cwd before launching Claude to avoid inheriting
-                        # an unexpected project context in nested tmux setups.
-                        launch_cmd = f"cd {shlex.quote(str(path))} && {cmd}"
+                        launch_cmd = self._build_claude_launch_command(
+                            path, resume_session_id
+                        )
                         pane.send_keys(launch_cmd, enter=True)
 
                 logger.info(
