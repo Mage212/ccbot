@@ -203,6 +203,46 @@ class TestToolUseInteractiveOrdering:
                 c.args[2].source == "tool_use" for c in mock_probe.call_args_list
             )
 
+    @pytest.mark.asyncio
+    async def test_tool_result_not_modified_does_not_send_duplicate(self, mock_bot: AsyncMock):
+        task = MessageTask(
+            task_type="content",
+            window_id="@5",
+            parts=["<b>Bash</b>(git add .)"],
+            tool_use_id="tool_dup_guard",
+            content_type="tool_result",
+            thread_id=42,
+        )
+        _tool_msg_ids[("tool_dup_guard", 1, 42)] = 555
+
+        with (
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback", new_callable=AsyncMock
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._send_task_images", new_callable=AsyncMock
+            ) as mock_images,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.message_queue._do_clear_status_message",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_sm.resolve_chat_id.return_value = 100
+            mock_bot.edit_message_text.side_effect = BadRequest("Message is not modified")
+
+            await _process_content_task(mock_bot, user_id=1, task=task)
+
+            mock_bot.edit_message_text.assert_called_once()
+            mock_send.assert_not_called()
+            mock_images.assert_called_once()
+            mock_status.assert_called_once()
+            assert ("tool_dup_guard", 1, 42) not in _tool_msg_ids
+
 
 @pytest.mark.usefixtures("_clear_queue_state", "_clear_interactive_state")
 class TestInteractiveProbeRendering:

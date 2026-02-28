@@ -18,6 +18,8 @@ RetryAfter exceptions are re-raised so callers (queue worker) can handle them.
 
 import io
 import logging
+import re
+from html import unescape
 from typing import Any
 
 from telegram import Bot, InputMediaPhoto, LinkPreviewOptions, Message
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 # HTML tags that indicate text is already converted
 _HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
+_RE_HTML_TAG = re.compile(r"<[^>]+>")
 
 
 def _is_already_html(text: str) -> bool:
@@ -41,6 +44,20 @@ def _ensure_html(text: str) -> str:
     if _is_already_html(text):
         return text
     return convert_markdown(text)
+
+
+def _to_plain_text_fallback(text: str) -> str:
+    """Build safe plain-text fallback from markdown or pre-rendered HTML."""
+    plain = strip_sentinels(text)
+    if not _is_already_html(plain):
+        return plain
+    # Preserve minimal structure before stripping tags.
+    plain = re.sub(r"<br\s*/?>", "\n", plain, flags=re.IGNORECASE)
+    plain = re.sub(r"</p\s*>", "\n\n", plain, flags=re.IGNORECASE)
+    plain = re.sub(r"<li\s*>", "- ", plain, flags=re.IGNORECASE)
+    plain = re.sub(r"</li\s*>", "\n", plain, flags=re.IGNORECASE)
+    plain = _RE_HTML_TAG.sub("", plain)
+    return unescape(plain).strip()
 
 
 PARSE_MODE = "HTML"
@@ -73,9 +90,7 @@ async def send_with_fallback(
         raise
     except Exception:
         try:
-            return await bot.send_message(
-                chat_id=chat_id, text=strip_sentinels(text), **kwargs
-            )
+            return await bot.send_message(chat_id=chat_id, text=_to_plain_text_fallback(text), **kwargs)
         except RetryAfter:
             raise
         except Exception as e:
@@ -138,7 +153,7 @@ async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message:
         raise
     except Exception:
         try:
-            return await message.reply_text(strip_sentinels(text), **kwargs)
+            return await message.reply_text(_to_plain_text_fallback(text), **kwargs)
         except RetryAfter:
             raise
         except Exception as e:
@@ -159,7 +174,7 @@ async def safe_edit(target: Any, text: str, **kwargs: Any) -> None:
         raise
     except Exception:
         try:
-            await target.edit_message_text(strip_sentinels(text), **kwargs)
+            await target.edit_message_text(_to_plain_text_fallback(text), **kwargs)
         except RetryAfter:
             raise
         except Exception as e:
@@ -188,9 +203,7 @@ async def safe_send(
         raise
     except Exception:
         try:
-            await bot.send_message(
-                chat_id=chat_id, text=strip_sentinels(text), **kwargs
-            )
+            await bot.send_message(chat_id=chat_id, text=_to_plain_text_fallback(text), **kwargs)
         except RetryAfter:
             raise
         except Exception as e:

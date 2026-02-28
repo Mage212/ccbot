@@ -648,6 +648,29 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 return
             except RetryAfter:
                 raise
+            except BadRequest as e:
+                # Edit target already has identical content; treat as success.
+                if "message is not modified" in str(e).lower():
+                    await _send_task_images(bot, chat_id, task)
+                    await _check_and_send_status(bot, user_id, wid, task.thread_id)
+                    return
+                try:
+                    # Fallback: plain text with sentinels stripped
+                    plain_text = strip_sentinels(task.text or full_text)
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=edit_msg_id,
+                        text=plain_text,
+                        link_preview_options=NO_LINK_PREVIEW,
+                    )
+                    await _send_task_images(bot, chat_id, task)
+                    await _check_and_send_status(bot, user_id, wid, task.thread_id)
+                    return
+                except RetryAfter:
+                    raise
+                except Exception:
+                    logger.debug(f"Failed to edit tool msg {edit_msg_id}, sending new")
+                    # Fall through to send as new message
             except Exception:
                 try:
                     # Fallback: plain text with sentinels stripped
