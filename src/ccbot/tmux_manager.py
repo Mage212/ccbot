@@ -78,6 +78,19 @@ class TmuxManager:
             session.windows[0].rename_window(config.tmux_main_window_name)
         return session
 
+    def _build_claude_launch_command(self, path: Path) -> str:
+        """Build shell command to launch Claude in a clean project context.
+
+        `uv run ccbot` exports VIRTUAL_ENV and UV_* variables from the bot's
+        own project. Unset them so `uv` calls inside Claude resolve against
+        the selected directory, not the bot workspace.
+        """
+        return (
+            f"cd {shlex.quote(str(path))} && "
+            "unset VIRTUAL_ENV UV_PROJECT UV_WORKING_DIRECTORY && "
+            f"{config.claude_command}"
+        )
+
     async def list_windows(self) -> list[TmuxWindow]:
         """List all windows in the session with their working directories.
 
@@ -379,11 +392,7 @@ class TmuxManager:
                 if start_claude:
                     pane = window.active_pane
                     if pane:
-                        # Force cwd before launching Claude to avoid inheriting
-                        # an unexpected project context in nested tmux setups.
-                        launch_cmd = (
-                            f"cd {shlex.quote(str(path))} && {config.claude_command}"
-                        )
+                        launch_cmd = self._build_claude_launch_command(path)
                         pane.send_keys(launch_cmd, enter=True)
 
                 logger.info(
