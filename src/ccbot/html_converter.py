@@ -8,6 +8,7 @@ cleaner formatting and more reliable tag-aware message splitting.
 """
 
 import logging
+import re
 
 from chatgpt_md_converter import split_html_for_telegram, telegram_format
 
@@ -18,6 +19,88 @@ logger = logging.getLogger(__name__)
 # Re-export sentinel markers for compatibility
 EXPANDABLE_QUOTE_START = TranscriptParser.EXPANDABLE_QUOTE_START
 EXPANDABLE_QUOTE_END = TranscriptParser.EXPANDABLE_QUOTE_END
+
+
+def _split_table_row(line: str) -> list[str]:
+    """Split a table row by pipes, respecting escaped pipes (\\|)."""
+    content = line.strip().strip("|")
+    cells = re.split(r"(?<!\\)\|", content)
+    return [cell.strip().replace("\\|", "|") for cell in cells]
+
+
+def _convert_markdown_tables(text: str) -> str:
+    """Convert markdown tables to card-style key-value format.
+
+    Telegram has no table rendering. This converts each row into a card
+    with **Header**: value pairs, separated by horizontal lines — similar
+    to how Claude Code renders tables in narrow terminals.
+
+    Skips tables inside code blocks. Uses markdown bold so that
+    telegram_format() can process both headers and cell inline markup.
+    """
+    lines = text.split("\n")
+    result: list[str] = []
+    i = 0
+    in_code_block = False
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Track code blocks
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            result.append(line)
+            i += 1
+            continue
+
+        if in_code_block:
+            result.append(line)
+            i += 1
+            continue
+
+        # Check if this looks like a table header row
+        if (
+            stripped.startswith("|")
+            and stripped.endswith("|")
+            and "|" in stripped[1:-1]
+        ):
+            headers = _split_table_row(stripped)
+
+            # Next line must be separator (---|---|---)
+            if i + 1 < len(lines):
+                sep_line = lines[i + 1].strip()
+                if sep_line.startswith("|") and re.match(r"^[\s|:\-]+$", sep_line):
+                    i += 2  # Skip header + separator
+                    rows: list[list[str]] = []
+                    while i < len(lines):
+                        data_line = lines[i].strip()
+                        if data_line.startswith("|") and data_line.endswith("|"):
+                            rows.append(_split_table_row(data_line))
+                            i += 1
+                        else:
+                            break
+
+                    # Build card-style output
+                    separator = "────────────"
+                    cards: list[str] = []
+                    for row in rows:
+                        card_lines: list[str] = []
+                        for j, header in enumerate(headers):
+                            value = row[j] if j < len(row) else ""
+                            if value:
+                                card_lines.append(f"**{header}**: {value}")
+                            else:
+                                card_lines.append(f"**{header}**: —")
+                        cards.append("\n".join(card_lines))
+
+                    result.append(f"\n{separator}\n".join(cards))
+                    continue
+
+        result.append(line)
+        i += 1
+
+    return "\n".join(result)
 
 
 def _convert_expandable_quotes(text: str) -> str:
@@ -93,8 +176,8 @@ def split_message(text: str, max_length: int = 4096) -> list[str]:
 
     Drop-in replacement for telegram_sender.split_message().
     IMPORTANT: Always converts to HTML first, then checks length and splits.
-    Raw markdown length can differ greatly from HTML length (e.g. bold/code
-    tags, expandable quotes), so length must be checked after conversion.
+    Raw markdown length can differ greatly from HTML length (e.g. table→card
+    expansion, bold/code tags), so length must be checked after conversion.
     """
     html_text = _convert_to_html(text)
 
@@ -117,10 +200,14 @@ def _convert_to_html(text: str) -> str:
     # 1. Preprocess: fix nested backticks in code blocks
     text = _preprocess_nested_backticks(text)
 
-    # 2. Convert expandable quote sentinels to HTML
+    # 2. Convert markdown tables to card-style format (before telegram_format
+    #    so that inline markup inside cells gets processed)
+    text = _convert_markdown_tables(text)
+
+    # 3. Convert expandable quote sentinels to HTML
     text = _convert_expandable_quotes(text)
 
-    # 3. Convert rest of markdown to HTML
+    # 4. Convert rest of markdown to HTML
     return telegram_format(text)
 
 
