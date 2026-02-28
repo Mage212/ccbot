@@ -39,10 +39,29 @@ logger = logging.getLogger(__name__)
 # HTML tags that indicate text is already converted
 _HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
 
+# Escaped HTML entities that indicate text was already through telegram_format
+_HTML_ENTITIES = (
+    "&lt;pre&gt;",
+    "&lt;code&gt;",
+    "&lt;b&gt;",
+    "&lt;i&gt;",
+    "&lt;a ",
+    "&lt;blockquote",
+)
+
 
 def _is_already_html(text: str) -> bool:
-    """Check if text already contains Telegram HTML formatting."""
-    return any(tag in text for tag in _HTML_TAGS)
+    """Check if text already contains Telegram HTML formatting.
+
+    Detects both direct HTML tags (<b>) and escaped entities (&lt;b&gt;)
+    from text that was already processed by telegram_format.
+    """
+    if any(tag in text for tag in _HTML_TAGS):
+        return True
+    # Also check for escaped HTML - indicates text was already through converter
+    if any(entity in text for entity in _HTML_ENTITIES):
+        return True
+    return False
 
 
 def _ensure_html(text: str) -> str:

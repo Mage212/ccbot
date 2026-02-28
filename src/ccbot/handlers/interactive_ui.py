@@ -14,6 +14,7 @@ Provides:
 State dicts are keyed by (user_id, thread_id_or_0) for Telegram topic support.
 """
 
+import asyncio
 import logging
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -35,6 +36,9 @@ from .callback_data import (
 from .message_sender import NO_LINK_PREVIEW
 
 logger = logging.getLogger(__name__)
+
+# Lock to prevent race condition when multiple callers detect UI simultaneously
+_interactive_lock = asyncio.Lock()
 
 # Tool names that trigger interactive UI via JSONL (terminal capture + inline keyboard)
 INTERACTIVE_TOOL_NAMES = frozenset({"AskUserQuestion", "ExitPlanMode"})
@@ -153,83 +157,86 @@ async def handle_interactive_ui(
     False otherwise.
     """
     ikey = (user_id, thread_id or 0)
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
-    w = await tmux_manager.find_window_by_id(window_id)
-    if not w:
-        return False
 
-    # Capture plain text (no ANSI colors)
-    pane_text = await tmux_manager.capture_pane(w.window_id)
-    if not pane_text:
-        logger.debug("No pane text captured for window_id %s", window_id)
-        return False
+    # Use lock to prevent race condition: only one caller can send/edit at a time
+    async with _interactive_lock:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        w = await tmux_manager.find_window_by_id(window_id)
+        if not w:
+            return False
 
-    # Quick check if it looks like an interactive UI
-    if not is_interactive_ui(pane_text):
-        logger.debug(
-            "No interactive UI detected in window_id %s (last 3 lines: %s)",
-            window_id,
-            pane_text.strip().split("\n")[-3:],
+        # Capture plain text (no ANSI colors)
+        pane_text = await tmux_manager.capture_pane(w.window_id)
+        if not pane_text:
+            logger.debug("No pane text captured for window_id %s", window_id)
+            return False
+
+        # Quick check if it looks like an interactive UI
+        if not is_interactive_ui(pane_text):
+            logger.debug(
+                "No interactive UI detected in window_id %s (last 3 lines: %s)",
+                window_id,
+                pane_text.strip().split("\n")[-3:],
+            )
+            return False
+
+        # Extract content between separators
+        content = extract_interactive_content(pane_text)
+        if not content:
+            return False
+
+        # Build message with navigation keyboard
+        keyboard = _build_interactive_keyboard(window_id, ui_name=content.name)
+
+        # Send as plain text (no markdown conversion)
+        text = content.content
+
+        # Build thread kwargs for send_message
+        thread_kwargs: dict[str, int] = {}
+        if thread_id is not None:
+            thread_kwargs["message_thread_id"] = thread_id
+
+        # Check if we have an existing interactive message to edit
+        existing_msg_id = _interactive_msgs.get(ikey)
+        if existing_msg_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=existing_msg_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
+                _interactive_mode[ikey] = window_id
+                return True
+            except Exception:
+                # Edit failed (message deleted, etc.) - clear stale msg_id and send new
+                logger.debug(
+                    "Edit failed for interactive msg %s, sending new", existing_msg_id
+                )
+                _interactive_msgs.pop(ikey, None)
+                # Fall through to send new message
+
+        # Send new message (plain text — terminal content is not markdown)
+        logger.info(
+            "Sending interactive UI to user %d for window_id %s", user_id, window_id
         )
-        return False
-
-    # Extract content between separators
-    content = extract_interactive_content(pane_text)
-    if not content:
-        return False
-
-    # Build message with navigation keyboard
-    keyboard = _build_interactive_keyboard(window_id, ui_name=content.name)
-
-    # Send as plain text (no markdown conversion)
-    text = content.content
-
-    # Build thread kwargs for send_message
-    thread_kwargs: dict[str, int] = {}
-    if thread_id is not None:
-        thread_kwargs["message_thread_id"] = thread_id
-
-    # Check if we have an existing interactive message to edit
-    existing_msg_id = _interactive_msgs.get(ikey)
-    if existing_msg_id:
         try:
-            await bot.edit_message_text(
+            sent = await bot.send_message(
                 chat_id=chat_id,
-                message_id=existing_msg_id,
                 text=text,
                 reply_markup=keyboard,
                 link_preview_options=NO_LINK_PREVIEW,
+                **thread_kwargs,  # type: ignore[arg-type]
             )
+        except Exception as e:
+            logger.error("Failed to send interactive UI: %s", e)
+            return False
+        if sent:
+            _interactive_msgs[ikey] = sent.message_id
             _interactive_mode[ikey] = window_id
             return True
-        except Exception:
-            # Edit failed (message deleted, etc.) - clear stale msg_id and send new
-            logger.debug(
-                "Edit failed for interactive msg %s, sending new", existing_msg_id
-            )
-            _interactive_msgs.pop(ikey, None)
-            # Fall through to send new message
-
-    # Send new message (plain text — terminal content is not markdown)
-    logger.info(
-        "Sending interactive UI to user %d for window_id %s", user_id, window_id
-    )
-    try:
-        sent = await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=keyboard,
-            link_preview_options=NO_LINK_PREVIEW,
-            **thread_kwargs,  # type: ignore[arg-type]
-        )
-    except Exception as e:
-        logger.error("Failed to send interactive UI: %s", e)
         return False
-    if sent:
-        _interactive_msgs[ikey] = sent.message_id
-        _interactive_mode[ikey] = window_id
-        return True
-    return False
 
 
 async def clear_interactive_msg(

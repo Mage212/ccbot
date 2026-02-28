@@ -232,7 +232,12 @@ def parse_status_line(pane_text: str) -> str | None:
         if not line:
             continue
         if line[0] in STATUS_SPINNERS:
-            return line[1:].strip()
+            status_text = line[1:].strip()
+            # Don't capture thinking as status - it comes from JSONL with
+            # proper blockquote formatting. Capturing it here causes duplicates.
+            if status_text.startswith("∴"):
+                return None
+            return status_text
         # First non-empty line above separator isn't a spinner → no status
         return None
     return None

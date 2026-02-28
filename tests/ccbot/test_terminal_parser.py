@@ -62,6 +62,16 @@ class TestParseStatusLine:
     def test_uses_fixture(self, sample_pane_status_line: str):
         assert parse_status_line(sample_pane_status_line) == "Reading file src/main.py"
 
+    def test_thinking_marker_ignored(self, chrome: str):
+        """Thinking lines (∴ prefix) must be ignored - they come from JSONL."""
+        pane = f"output\n· ∴ Thinking… Analyzing code\n{chrome}"
+        assert parse_status_line(pane) is None
+
+    def test_thinking_marker_with_multiline_ignored(self, chrome: str):
+        """Multi-line thinking must also be ignored."""
+        pane = f"· ∴ Thinking… Checking files\nNo markdown found.\n{chrome}"
+        assert parse_status_line(pane) is None
+
 
 # ── extract_interactive_content ──────────────────────────────────────────
 
