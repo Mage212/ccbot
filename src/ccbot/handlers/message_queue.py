@@ -18,6 +18,7 @@ Key components:
 """
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -25,13 +26,18 @@ from typing import Literal
 
 from telegram import Bot
 from telegram.constants import ChatAction
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from ..html_converter import convert_markdown, strip_sentinels
 from ..session import session_manager
-from ..terminal_parser import is_interactive_ui, parse_status_line
+from ..terminal_parser import extract_active_interactive_content, parse_status_line
 from ..tmux_manager import tmux_manager
-from .interactive_ui import handle_interactive_ui
+from .interactive_ui import (
+    _build_interactive_keyboard,
+    clear_interactive_tracking,
+    set_interactive_mode,
+    set_interactive_msg_id,
+)
 from .message_sender import NO_LINK_PREVIEW, PARSE_MODE, send_photo, send_with_fallback
 
 logger = logging.getLogger(__name__)
@@ -79,7 +85,13 @@ MERGE_MAX_LENGTH = 3800  # Leave room for markdown conversion overhead
 class MessageTask:
     """Message task for queue processing."""
 
-    task_type: Literal["content", "status_update", "status_clear"]
+    task_type: Literal[
+        "content",
+        "status_update",
+        "status_clear",
+        "interactive_probe",
+        "interactive_clear",
+    ]
     text: str | None = None
     window_id: str | None = None
     # content type fields
@@ -88,6 +100,7 @@ class MessageTask:
     content_type: str = "text"
     thread_id: int | None = None  # Telegram topic thread_id for targeted send
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
+    source: str | None = None  # Probe source for diagnostics (poller/callback/tool_use)
 
 
 # Per-user message queues and worker tasks
@@ -101,6 +114,14 @@ _tool_msg_ids: dict[tuple[str, int, int], int] = {}
 
 # Status message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+
+# Interactive UI render tracking:
+# (user_id, thread_id_or_0) -> (message_id, window_id, fingerprint)
+_interactive_render_state: dict[tuple[int, int], tuple[int, str, str]] = {}
+
+# Coalescing key for queued interactive probes:
+# (user_id, thread_id_or_0, window_id)
+_interactive_probe_pending: set[tuple[int, int, str]] = set()
 
 # Flood control: user_id -> monotonic time when ban expires
 _flood_until: dict[int, float] = {}
@@ -265,6 +286,16 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _process_status_update_task(bot, user_id, task)
                 elif task.task_type == "status_clear":
                     await _do_clear_status_message(bot, user_id, task.thread_id or 0)
+                elif task.task_type == "interactive_probe":
+                    try:
+                        await _process_interactive_probe_task(bot, user_id, task)
+                    finally:
+                        tid = task.thread_id or 0
+                        wid = task.window_id or ""
+                        if wid:
+                            _interactive_probe_pending.discard((user_id, tid, wid))
+                elif task.task_type == "interactive_clear":
+                    await _clear_interactive_render(bot, user_id, task.thread_id or 0)
             except RetryAfter as e:
                 retry_secs = (
                     e.retry_after
@@ -319,6 +350,190 @@ async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> None:
         task.image_data,
         **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
     )
+
+
+def _interactive_fingerprint(window_id: str, ui_name: str, text: str) -> str:
+    """Build a stable fingerprint for interactive UI deduplication."""
+    payload = f"{window_id}\n{ui_name}\n{text.strip()}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+async def _clear_interactive_render(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int,
+) -> None:
+    """Delete currently tracked interactive UI message (if any)."""
+    ikey = (user_id, thread_id_or_0)
+    state = _interactive_render_state.pop(ikey, None)
+    if not state:
+        clear_interactive_tracking(user_id, thread_id_or_0 or None)
+        return
+
+    msg_id, _, _ = state
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    except Exception:
+        pass
+    clear_interactive_tracking(user_id, thread_id_or_0 or None)
+
+
+async def _process_interactive_probe_task(
+    bot: Bot,
+    user_id: int,
+    task: MessageTask,
+) -> bool:
+    """Render interactive UI from current pane snapshot.
+
+    Returns True when an interactive UI is visible after processing.
+    """
+    tid = task.thread_id or 0
+    thread_id = task.thread_id
+    wid = task.window_id or ""
+    source = task.source or "unknown"
+    if not wid:
+        return False
+
+    w = await tmux_manager.find_window_by_id(wid)
+    if not w:
+        await _clear_interactive_render(bot, user_id, tid)
+        logger.debug(
+            "Interactive probe clear: source=%s user=%d thread=%s window=%s reason=window_missing",
+            source,
+            user_id,
+            thread_id,
+            wid,
+        )
+        return False
+
+    pane_text = await tmux_manager.capture_pane(w.window_id)
+    if not pane_text:
+        return False
+
+    content = extract_active_interactive_content(pane_text)
+    if not content:
+        await _clear_interactive_render(bot, user_id, tid)
+        logger.debug(
+            "Interactive probe clear: source=%s user=%d thread=%s window=%s reason=ui_absent",
+            source,
+            user_id,
+            thread_id,
+            wid,
+        )
+        return False
+
+    text = content.content
+    fp = _interactive_fingerprint(wid, content.name, text)
+    ikey = (user_id, tid)
+    current = _interactive_render_state.get(ikey)
+
+    if current and current[1] == wid and current[2] == fp:
+        logger.debug(
+            "Interactive probe noop: source=%s user=%d thread=%s window=%s fp=%s",
+            source,
+            user_id,
+            thread_id,
+            wid,
+            fp[:8],
+        )
+        return True
+
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    keyboard = _build_interactive_keyboard(wid, ui_name=content.name)
+    thread_kwargs = _send_kwargs(thread_id)
+
+    # Window switched in same thread: delete stale interactive message first.
+    if current and current[1] != wid:
+        await _clear_interactive_render(bot, user_id, tid)
+        current = None
+
+    if current:
+        msg_id = current[0]
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=keyboard,
+                link_preview_options=NO_LINK_PREVIEW,
+            )
+            _interactive_render_state[ikey] = (msg_id, wid, fp)
+            set_interactive_mode(user_id, wid, thread_id)
+            set_interactive_msg_id(user_id, msg_id, thread_id)
+            logger.debug(
+                "Interactive probe edit: source=%s user=%d thread=%s window=%s fp=%s",
+                source,
+                user_id,
+                thread_id,
+                wid,
+                fp[:8],
+            )
+            return True
+        except RetryAfter:
+            raise
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                _interactive_render_state[ikey] = (msg_id, wid, fp)
+                set_interactive_mode(user_id, wid, thread_id)
+                set_interactive_msg_id(user_id, msg_id, thread_id)
+                logger.debug(
+                    "Interactive probe noop-edit: source=%s user=%d thread=%s window=%s fp=%s",
+                    source,
+                    user_id,
+                    thread_id,
+                    wid,
+                    fp[:8],
+                )
+                return True
+            logger.debug(
+                "Interactive probe edit failed: source=%s user=%d thread=%s window=%s error=%s",
+                source,
+                user_id,
+                thread_id,
+                wid,
+                e,
+            )
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(
+                "Interactive probe edit failed: source=%s user=%d thread=%s window=%s error=%s",
+                source,
+                user_id,
+                thread_id,
+                wid,
+                e,
+            )
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=keyboard,
+        link_preview_options=NO_LINK_PREVIEW,
+        **thread_kwargs,  # type: ignore[arg-type]
+    )
+    if not sent:
+        return False
+
+    _interactive_render_state[ikey] = (sent.message_id, wid, fp)
+    set_interactive_mode(user_id, wid, thread_id)
+    set_interactive_msg_id(user_id, sent.message_id, thread_id)
+    logger.debug(
+        "Interactive probe send: source=%s user=%d thread=%s window=%s fp=%s",
+        source,
+        user_id,
+        thread_id,
+        wid,
+        fp[:8],
+    )
+    return True
 
 
 async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> None:
@@ -402,19 +617,23 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     if last_msg_id and task.tool_use_id and task.content_type == "tool_use":
         _tool_msg_ids[(task.tool_use_id, user_id, tid)] = last_msg_id
 
-    # 3.5 Check for interactive UI after tool_use (ensures UI appears after message)
+    # 3.5 Probe interactive UI right after tool_use to preserve ordering.
+    # Run inside the same worker task so it cannot race with poller callbacks.
     if task.content_type == "tool_use" and task.window_id:
-        w = await tmux_manager.find_window_by_id(task.window_id)
-        if w:
-            pane_text = await tmux_manager.capture_pane(w.window_id)
-            if pane_text and is_interactive_ui(pane_text):
-                # UI detected - send it now (after tool_use message)
-                await handle_interactive_ui(
-                    bot, user_id, task.window_id, task.thread_id
-                )
-                # Send images and return - don't send status after UI
-                await _send_task_images(bot, chat_id, task)
-                return
+        ui_visible = await _process_interactive_probe_task(
+            bot,
+            user_id,
+            MessageTask(
+                task_type="interactive_probe",
+                window_id=task.window_id,
+                thread_id=task.thread_id,
+                source="tool_use",
+            ),
+        )
+        if ui_visible:
+            # Send images and return - don't send status after UI
+            await _send_task_images(bot, chat_id, task)
+            return
 
     # 4. Send images if present (from tool_result with base64 image blocks)
     await _send_task_images(bot, chat_id, task)
@@ -699,10 +918,62 @@ async def enqueue_status_update(
     queue.put_nowait(task)
 
 
+async def enqueue_interactive_probe(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None = None,
+    source: str = "",
+) -> None:
+    """Enqueue interactive UI probe with lightweight coalescing."""
+    tid = thread_id or 0
+    pkey = (user_id, tid, window_id)
+    if pkey in _interactive_probe_pending:
+        return
+
+    _interactive_probe_pending.add(pkey)
+    queue = get_or_create_queue(bot, user_id)
+    queue.put_nowait(
+        MessageTask(
+            task_type="interactive_probe",
+            window_id=window_id,
+            thread_id=thread_id,
+            source=source or "manual",
+        )
+    )
+
+
+async def enqueue_interactive_clear(
+    bot: Bot,
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Enqueue interactive UI clear task."""
+    queue = get_or_create_queue(bot, user_id)
+    queue.put_nowait(
+        MessageTask(task_type="interactive_clear", thread_id=thread_id, source="manual")
+    )
+
+
 def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
     """Clear status message tracking for a user (and optionally a specific thread)."""
     skey = (user_id, thread_id or 0)
     _status_msg_info.pop(skey, None)
+
+
+def clear_interactive_render_state(user_id: int, thread_id: int | None = None) -> None:
+    """Clear interactive render tracking for a user/topic."""
+    tid = thread_id or 0
+    _interactive_render_state.pop((user_id, tid), None)
+    clear_interactive_tracking(user_id, thread_id)
+    # Drop pending probes for this user/thread to avoid stale re-renders.
+    keys_to_remove = [
+        key
+        for key in _interactive_probe_pending
+        if key[0] == user_id and (thread_id is None or key[1] == tid)
+    ]
+    for key in keys_to_remove:
+        _interactive_probe_pending.discard(key)
 
 
 def clear_tool_msg_ids_for_topic(user_id: int, thread_id: int | None = None) -> None:
@@ -730,4 +1001,6 @@ async def shutdown_workers() -> None:
     _queue_workers.clear()
     _message_queues.clear()
     _queue_locks.clear()
+    _interactive_render_state.clear()
+    _interactive_probe_pending.clear()
     logger.info("Message queue workers stopped")

@@ -1,4 +1,4 @@
-"""Tests for status_polling — Settings UI detection via the poller path.
+"""Tests for status_polling — queue-driven interactive UI probing.
 
 Simulates the user workflow: /model is sent to Claude Code, the Settings
 model picker renders in the terminal, and the status poller detects it
@@ -45,7 +45,7 @@ class TestStatusPollerSettingsDetection:
     async def test_settings_ui_detected_and_keyboard_sent(
         self, mock_bot: AsyncMock, sample_pane_settings: str
     ):
-        """Poller captures Settings pane → handle_interactive_ui sends keyboard."""
+        """Poller captures Settings pane → enqueue_interactive_probe is called."""
         window_id = "@5"
         mock_window = MagicMock()
         mock_window.window_id = window_id
@@ -53,23 +53,29 @@ class TestStatusPollerSettingsDetection:
         with (
             patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
             patch(
-                "ccbot.handlers.status_polling.handle_interactive_ui",
+                "ccbot.handlers.status_polling.enqueue_interactive_probe",
                 new_callable=AsyncMock,
-            ) as mock_handle_ui,
+            ) as mock_probe,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
         ):
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.capture_pane = AsyncMock(return_value=sample_pane_settings)
-            mock_handle_ui.return_value = True
 
             await update_status_message(
                 mock_bot, user_id=1, window_id=window_id, thread_id=42
             )
 
-            mock_handle_ui.assert_called_once_with(mock_bot, 1, window_id, 42)
+            mock_probe.assert_called_once_with(
+                mock_bot, 1, window_id, thread_id=42, source="poller"
+            )
+            mock_status.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_normal_pane_no_interactive_ui(self, mock_bot: AsyncMock):
-        """Normal pane text → no handle_interactive_ui call, just status check."""
+        """Normal pane text → no probe enqueue, status check runs."""
         window_id = "@5"
         mock_window = MagicMock()
         mock_window.window_id = window_id
@@ -85,13 +91,13 @@ class TestStatusPollerSettingsDetection:
         with (
             patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
             patch(
-                "ccbot.handlers.status_polling.handle_interactive_ui",
+                "ccbot.handlers.status_polling.enqueue_interactive_probe",
                 new_callable=AsyncMock,
-            ) as mock_handle_ui,
+            ) as mock_probe,
             patch(
                 "ccbot.handlers.status_polling.enqueue_status_update",
                 new_callable=AsyncMock,
-            ),
+            ) as mock_status,
         ):
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.capture_pane = AsyncMock(return_value=normal_pane)
@@ -100,42 +106,102 @@ class TestStatusPollerSettingsDetection:
                 mock_bot, user_id=1, window_id=window_id, thread_id=42
             )
 
-            mock_handle_ui.assert_not_called()
+            mock_probe.assert_not_called()
+            mock_status.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_settings_ui_end_to_end_sends_telegram_keyboard(
-        self, mock_bot: AsyncMock, sample_pane_settings: str
+    async def test_stale_interactive_msg_triggers_probe_for_clear(
+        self, mock_bot: AsyncMock
     ):
-        """Full end-to-end: poller → is_interactive_ui → handle_interactive_ui
-        → bot.send_message with keyboard.
-
-        Uses real handle_interactive_ui (not mocked) to verify the full path.
-        """
+        """No UI in pane but tracked interactive message exists → enqueue probe."""
         window_id = "@5"
         mock_window = MagicMock()
         mock_window.window_id = window_id
+        pane_without_ui = "normal output\nno prompt\n"
 
         with (
-            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux_poll,
-            patch("ccbot.handlers.interactive_ui.tmux_manager") as mock_tmux_ui,
-            patch("ccbot.handlers.interactive_ui.session_manager") as mock_sm,
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.handlers.status_polling.get_interactive_msg_id",
+                return_value=777,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.enqueue_interactive_probe",
+                new_callable=AsyncMock,
+            ) as mock_probe,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
         ):
-            mock_tmux_poll.find_window_by_id = AsyncMock(return_value=mock_window)
-            mock_tmux_poll.capture_pane = AsyncMock(return_value=sample_pane_settings)
-            mock_tmux_ui.find_window_by_id = AsyncMock(return_value=mock_window)
-            mock_tmux_ui.capture_pane = AsyncMock(return_value=sample_pane_settings)
-            mock_sm.resolve_chat_id.return_value = 100
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+            mock_tmux.capture_pane = AsyncMock(return_value=pane_without_ui)
 
             await update_status_message(
                 mock_bot, user_id=1, window_id=window_id, thread_id=42
             )
 
-            # Verify bot.send_message was called with keyboard
-            mock_bot.send_message.assert_called_once()
-            call_kwargs = mock_bot.send_message.call_args.kwargs
-            assert call_kwargs["chat_id"] == 100
-            assert call_kwargs["message_thread_id"] == 42
-            keyboard = call_kwargs["reply_markup"]
-            assert keyboard is not None
-            # Verify the message text contains model picker content
-            assert "Select model" in call_kwargs["text"]
+            mock_probe.assert_called_once_with(
+                mock_bot, 1, window_id, thread_id=42, source="poller"
+            )
+            mock_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_historical_prompt_does_not_block_statusline(
+        self, mock_bot: AsyncMock
+    ):
+        """Old prompt text in scrollback must not suppress live statusline updates."""
+        window_id = "@5"
+        mock_window = MagicMock()
+        mock_window.window_id = window_id
+        pane_with_old_prompt_and_status = (
+            "  Do you want to proceed?\n"
+            "   ❯ 1. Yes\n"
+            "     2. Yes, and don’t ask again for: uv run mypy src/ --ignore-missing-imports 2>&1\n"
+            "     3. No\n"
+            "  Esc to cancel · Tab to amend\n"
+            "\n"
+            "✻ Reading file src/main.py\n"
+            "──────────────────────────────────────\n"
+            "❯ \n"
+            "──────────────────────────────────────\n"
+            "  [Opus 4.6] Context: 50%\n"
+        )
+
+        with (
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_interactive_probe",
+                new_callable=AsyncMock,
+            ) as mock_probe,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_interactive_clear",
+                new_callable=AsyncMock,
+            ) as mock_clear,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.status_polling.get_interactive_msg_id",
+                return_value=None,
+            ),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+            mock_tmux.capture_pane = AsyncMock(
+                return_value=pane_with_old_prompt_and_status
+            )
+
+            await update_status_message(
+                mock_bot, user_id=1, window_id=window_id, thread_id=42
+            )
+
+            mock_probe.assert_not_called()
+            mock_clear.assert_not_called()
+            mock_status.assert_called_once_with(
+                mock_bot,
+                1,
+                window_id,
+                "Reading file src/main.py",
+                thread_id=42,
+            )

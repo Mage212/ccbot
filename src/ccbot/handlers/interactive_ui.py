@@ -20,7 +20,7 @@ import logging
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..session import session_manager
-from ..terminal_parser import extract_interactive_content, is_interactive_ui
+from ..terminal_parser import extract_active_interactive_content, is_interactive_ui
 from ..tmux_manager import tmux_manager
 from .callback_data import (
     CB_ASK_DOWN,
@@ -79,6 +79,21 @@ def clear_interactive_mode(user_id: int, thread_id: int | None = None) -> None:
 def get_interactive_msg_id(user_id: int, thread_id: int | None = None) -> int | None:
     """Get the interactive message ID for a user."""
     return _interactive_msgs.get((user_id, thread_id or 0))
+
+
+def set_interactive_msg_id(
+    user_id: int,
+    message_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Track interactive message ID without sending/deleting messages."""
+    _interactive_msgs[(user_id, thread_id or 0)] = message_id
+
+
+def clear_interactive_tracking(user_id: int, thread_id: int | None = None) -> None:
+    """Clear in-memory interactive tracking without Telegram side effects."""
+    _interactive_msgs.pop((user_id, thread_id or 0), None)
+    _interactive_mode.pop((user_id, thread_id or 0), None)
 
 
 def _build_interactive_keyboard(
@@ -181,7 +196,7 @@ async def handle_interactive_ui(
             return False
 
         # Extract content between separators
-        content = extract_interactive_content(pane_text)
+        content = extract_active_interactive_content(pane_text)
         if not content:
             return False
 
@@ -246,8 +261,8 @@ async def clear_interactive_msg(
 ) -> None:
     """Clear tracked interactive message, delete from chat, and exit interactive mode."""
     ikey = (user_id, thread_id or 0)
-    msg_id = _interactive_msgs.pop(ikey, None)
-    _interactive_mode.pop(ikey, None)
+    msg_id = _interactive_msgs.get(ikey)
+    clear_interactive_tracking(user_id, thread_id)
     logger.debug(
         "Clear interactive msg: user=%d, thread=%s, msg_id=%s",
         user_id,

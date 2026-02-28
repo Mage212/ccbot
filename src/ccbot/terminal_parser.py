@@ -44,6 +44,16 @@ class UIPattern:
     min_gap: int = 2  # minimum lines between top and bottom (inclusive)
 
 
+@dataclass(frozen=True)
+class _UIMatch:
+    """Internal extracted UI region with boundaries for active selection."""
+
+    result: InteractiveUIContent
+    top_idx: int
+    bottom_idx: int
+    pattern_idx: int
+
+
 # ── UI pattern definitions (order matters — first match wins) ────────────
 
 UI_PATTERNS: list[UIPattern] = [
@@ -94,6 +104,7 @@ UI_PATTERNS: list[UIPattern] = [
         top=(
             re.compile(r"^\s*Bash command\s*$"),
             re.compile(r"^\s*This command requires approval"),
+            re.compile(r"^\s*Bash\(.+\)\s*$"),
         ),
         bottom=(re.compile(r"^\s*Esc to cancel"),),
     ),
@@ -133,64 +144,107 @@ def _shorten_separators(text: str) -> str:
 # ── Core extraction ──────────────────────────────────────────────────────
 
 
-def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent | None:
-    """Try to extract content matching a single UI pattern.
+def _try_extract(lines: list[str], pattern: UIPattern, pattern_idx: int) -> list[_UIMatch]:
+    """Extract all content regions matching a single UI pattern.
 
     When ``pattern.bottom`` is empty, the region extends from the top marker
     to the last non-empty line (used for multi-tab AskUserQuestion where the
     bottom delimiter varies by tab).
     """
-    top_idx: int | None = None
-    bottom_idx: int | None = None
+    matches: list[_UIMatch] = []
 
-    for i, line in enumerate(lines):
-        if top_idx is None:
-            if any(p.search(line) for p in pattern.top):
-                top_idx = i
-        elif pattern.bottom and any(p.search(line) for p in pattern.bottom):
-            bottom_idx = i
-            break
+    for top_idx, line in enumerate(lines):
+        if not any(p.search(line) for p in pattern.top):
+            continue
 
-    if top_idx is None:
+        bottom_idx: int | None = None
+
+        # No bottom patterns → use last non-empty line as boundary
+        if not pattern.bottom:
+            for i in range(len(lines) - 1, top_idx, -1):
+                if lines[i].strip():
+                    bottom_idx = i
+                    break
+        else:
+            for i in range(top_idx + 1, len(lines)):
+                if any(p.search(lines[i]) for p in pattern.bottom):
+                    bottom_idx = i
+                    break
+
+        if bottom_idx is None or bottom_idx - top_idx < pattern.min_gap:
+            continue
+
+        content = "\n".join(lines[top_idx : bottom_idx + 1]).rstrip()
+        matches.append(
+            _UIMatch(
+                result=InteractiveUIContent(
+                    content=_shorten_separators(content), name=pattern.name
+                ),
+                top_idx=top_idx,
+                bottom_idx=bottom_idx,
+                pattern_idx=pattern_idx,
+            )
+        )
+
+    return matches
+
+
+def _select_active_match(matches: list[_UIMatch]) -> InteractiveUIContent | None:
+    """Select the active (most recent) interactive region in the pane."""
+    if not matches:
         return None
 
-    # No bottom patterns → use last non-empty line as boundary
-    if not pattern.bottom:
-        for i in range(len(lines) - 1, top_idx, -1):
-            if lines[i].strip():
-                bottom_idx = i
-                break
+    best: _UIMatch | None = None
+    for match in matches:
+        if best is None:
+            best = match
+            continue
+        if match.bottom_idx > best.bottom_idx:
+            best = match
+            continue
+        if (
+            match.bottom_idx == best.bottom_idx
+            and match.pattern_idx < best.pattern_idx
+        ):
+            best = match
+            continue
+        if (
+            match.bottom_idx == best.bottom_idx
+            and match.pattern_idx == best.pattern_idx
+            and match.top_idx > best.top_idx
+        ):
+            best = match
 
-    if bottom_idx is None or bottom_idx - top_idx < pattern.min_gap:
-        return None
-
-    content = "\n".join(lines[top_idx : bottom_idx + 1]).rstrip()
-    return InteractiveUIContent(content=_shorten_separators(content), name=pattern.name)
+    return best.result if best else None
 
 
 # ── Public API ───────────────────────────────────────────────────────────
 
 
-def extract_interactive_content(pane_text: str) -> InteractiveUIContent | None:
-    """Extract content from an interactive UI in terminal output.
+def extract_active_interactive_content(pane_text: str) -> InteractiveUIContent | None:
+    """Extract currently active interactive UI content from terminal output.
 
-    Tries each UI pattern in declaration order; first match wins.
-    Returns None if no recognizable interactive UI is found.
+    When multiple matching UI regions are visible (e.g. history + active prompt),
+    returns the most recent (bottom-most) valid region.
     """
     if not pane_text:
         return None
 
     lines = pane_text.strip().split("\n")
-    for pattern in UI_PATTERNS:
-        result = _try_extract(lines, pattern)
-        if result:
-            return result
-    return None
+    matches: list[_UIMatch] = []
+    for pattern_idx, pattern in enumerate(UI_PATTERNS):
+        matches.extend(_try_extract(lines, pattern, pattern_idx))
+    return _select_active_match(matches)
+
+
+def extract_interactive_content(pane_text: str) -> InteractiveUIContent | None:
+    """Backward-compatible alias for active interactive UI extraction."""
+    return extract_active_interactive_content(pane_text)
 
 
 def is_interactive_ui(pane_text: str) -> bool:
     """Check if terminal currently shows an interactive UI."""
-    return extract_interactive_content(pane_text) is not None
+    return extract_active_interactive_content(pane_text) is not None
 
 
 # ── Status line parsing ─────────────────────────────────────────────────
