@@ -19,6 +19,7 @@ from telegram.error import BadRequest, RetryAfter
 from ..config import config
 from ..entities_converter import (
     render_markdown_to_entities,
+    split_plain_text,
     split_text_and_entities,
     strip_sentinels,
 )
@@ -53,32 +54,6 @@ def _ensure_html(text: str) -> str:
     return convert_markdown(text)
 
 
-def _split_plain_text(text: str, max_chars: int = 4000) -> list[str]:
-    """Split plain text into Telegram-safe chunks."""
-    if len(text) <= max_chars:
-        return [text]
-
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + max_chars, len(text))
-        if end < len(text):
-            preferred_from = start + max_chars // 2
-            newline = text.rfind("\n", preferred_from, end)
-            if newline > start:
-                end = newline + 1
-            else:
-                space = text.rfind(" ", preferred_from, end)
-                if space > start:
-                    end = space + 1
-        if end <= start:
-            end = min(start + max_chars, len(text))
-        chunks.append(text[start:end])
-        start = end
-
-    return chunks
-
-
 def _to_plain_text_fallback(text: str) -> str:
     """Build safe plain-text fallback from markdown or pre-rendered HTML."""
     plain = strip_sentinels(text)
@@ -101,7 +76,7 @@ async def _send_plain_with_chunks(
 ) -> Message | None:
     """Send plain text in chunks, return the first message."""
     first: Message | None = None
-    for chunk in _split_plain_text(_to_plain_text_fallback(text)):
+    for chunk in split_plain_text(_to_plain_text_fallback(text)):
         sent = await bot.send_message(chat_id=chat_id, text=chunk, **kwargs)
         if first is None:
             first = sent
@@ -295,7 +270,7 @@ async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message:
     except Exception:
         try:
             first: Message | None = None
-            for chunk in _split_plain_text(_to_plain_text_fallback(text)):
+            for chunk in split_plain_text(_to_plain_text_fallback(text)):
                 sent = await message.reply_text(chunk, **kwargs)
                 if first is None:
                     first = sent

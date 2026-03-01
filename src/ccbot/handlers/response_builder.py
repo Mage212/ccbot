@@ -13,7 +13,9 @@ Key function:
   - build_response_parts: Build paginated response messages
 """
 
-from ..html_converter import split_message
+from ..config import config
+from ..entities_converter import split_plain_text
+from ..html_converter import split_message as split_html_message
 from ..transcript_parser import TranscriptParser
 
 
@@ -75,7 +77,10 @@ def build_response_parts(
     # Use conservative max to leave room for MarkdownV2 expansion at send layer.
     max_text = 3000 - len(prefix) - len(separator)
 
-    text_chunks = split_message(text, max_length=max_text)
+    if config.use_entities_converter:
+        text_chunks = split_plain_text(text, max_chars=max_text)
+    else:
+        text_chunks = split_html_message(text, max_length=max_text)
     total = len(text_chunks)
 
     if total == 1:

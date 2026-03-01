@@ -13,8 +13,9 @@ from typing import Any
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..config import config
+from ..entities_converter import split_plain_text
 from ..session import session_manager
-from ..html_converter import split_message
+from ..html_converter import split_message as split_html_message
 from ..transcript_parser import TranscriptParser
 from .callback_data import CB_HISTORY_NEXT, CB_HISTORY_PREV
 from .message_sender import safe_edit, safe_reply, safe_send
@@ -196,7 +197,10 @@ async def send_history(
             else:
                 lines.append(msg_text)
         full_text = "\n\n".join(lines)
-        pages = split_message(full_text, max_length=4096)
+        if config.use_entities_converter:
+            pages = split_plain_text(full_text, max_chars=4096)
+        else:
+            pages = split_html_message(full_text, max_length=4096)
 
         # Default to last page (newest messages) for both history and unread
         if offset < 0:

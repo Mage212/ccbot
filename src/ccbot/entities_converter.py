@@ -284,3 +284,31 @@ def split_text_and_entities(
         start_cp = end_cp
 
     return chunks
+
+
+def split_plain_text(text: str, max_chars: int = 4000) -> list[str]:
+    """Split plain text without converting markup."""
+    if max_chars <= 0:
+        raise ValueError("max_chars must be > 0")
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(start + max_chars, len(text))
+        if end < len(text):
+            preferred_from = start + max_chars // 2
+            newline = text.rfind("\n", preferred_from, end)
+            if newline > start:
+                end = newline + 1
+            else:
+                space = text.rfind(" ", preferred_from, end)
+                if space > start:
+                    end = space + 1
+        if end <= start:
+            end = min(start + max_chars, len(text))
+        chunks.append(text[start:end])
+        start = end
+
+    return chunks

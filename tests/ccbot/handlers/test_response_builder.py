@@ -58,3 +58,21 @@ class TestBuildResponseParts:
         assert len(parts) == 1
         assert "\U0001f464" not in parts[0]
         assert "Thinking" not in parts[0]
+
+    def test_entities_mode_preserves_single_newlines(self, monkeypatch):
+        from ccbot.handlers import response_builder
+
+        monkeypatch.setattr(response_builder.config, "use_entities_converter", True)
+        text = "Read(/tmp/file.py)\n⎿ Read 19 lines"
+        parts = build_response_parts(text, is_complete=True, content_type="text")
+        assert len(parts) == 1
+        assert "Read(/tmp/file.py)\n⎿ Read 19 lines" in parts[0]
+
+    def test_entities_mode_uses_plain_splitter(self, monkeypatch):
+        from ccbot.handlers import response_builder
+
+        monkeypatch.setattr(response_builder.config, "use_entities_converter", True)
+        long_text = "\n".join(f"line {i}" for i in range(2000))
+        parts = build_response_parts(long_text, is_complete=True, content_type="text")
+        assert len(parts) > 1
+        assert "\n" in parts[0]
