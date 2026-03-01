@@ -18,7 +18,7 @@ from .transcript_parser import TranscriptParser
 EXPANDABLE_QUOTE_START = TranscriptParser.EXPANDABLE_QUOTE_START
 EXPANDABLE_QUOTE_END = TranscriptParser.EXPANDABLE_QUOTE_END
 
-_MARKDOWN_RENDERER = MarkdownIt("commonmark").enable("strikethrough")
+_MARKDOWN_RENDERER = MarkdownIt("commonmark", {"breaks": True}).enable("strikethrough")
 
 _SPOILER_OPEN = "<tg-spoiler>"
 _SPOILER_CLOSE = "</tg-spoiler>"

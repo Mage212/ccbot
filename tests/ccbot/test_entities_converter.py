@@ -95,6 +95,15 @@ print(code)
         # "😀 " is 3 UTF-16 units (emoji surrogate pair + space)
         assert bold.offset == 3
 
+    def test_preserves_single_newlines_in_plain_text(self) -> None:
+        rendered = render_markdown_to_entities("line1\nline2\nline3")
+        assert "line1\nline2\nline3" in rendered.text
+
+    def test_preserves_read_summary_newline(self) -> None:
+        text = "Read(/home/vadim/file.py)\n⎿ Read 456 lines"
+        rendered = render_markdown_to_entities(text)
+        assert "Read(/home/vadim/file.py)\n⎿ Read 456 lines" in rendered.text
+
     def test_raw_u_tag_maps_to_underline_entity(self) -> None:
         rendered = render_markdown_to_entities("<u>underline</u>")
         assert any(entity.type == MessageEntity.UNDERLINE for entity in rendered.entities)
