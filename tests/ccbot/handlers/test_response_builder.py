@@ -68,11 +68,20 @@ class TestBuildResponseParts:
         assert len(parts) == 1
         assert "Read(/tmp/file.py)\n⎿ Read 19 lines" in parts[0]
 
-    def test_entities_mode_uses_plain_splitter(self, monkeypatch):
+    def test_entities_mode_does_not_pre_split_markdown(self, monkeypatch):
         from ccbot.handlers import response_builder
 
         monkeypatch.setattr(response_builder.config, "use_entities_converter", True)
         long_text = "\n".join(f"line {i}" for i in range(2000))
         parts = build_response_parts(long_text, is_complete=True, content_type="text")
-        assert len(parts) > 1
+        assert len(parts) == 1
         assert "\n" in parts[0]
+
+    def test_entities_mode_keeps_fenced_code_unsplit(self, monkeypatch):
+        from ccbot.handlers import response_builder
+
+        monkeypatch.setattr(response_builder.config, "use_entities_converter", True)
+        code = "```python\n" + "\n".join(f"line_{i} = {i}" for i in range(2000)) + "\n```"
+        parts = build_response_parts(code, is_complete=True, content_type="text")
+        assert len(parts) == 1
+        assert parts[0].count("```") == 2

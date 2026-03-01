@@ -14,7 +14,6 @@ Key function:
 """
 
 from ..config import config
-from ..entities_converter import split_plain_text
 from ..html_converter import split_message as split_html_message
 from ..transcript_parser import TranscriptParser
 
@@ -73,14 +72,17 @@ def build_response_parts(
             return [f"{prefix}{separator}{text}"]
         return [text]
 
-    # Split first, then assemble each chunk.
-    # Use conservative max to leave room for MarkdownV2 expansion at send layer.
-    max_text = 3000 - len(prefix) - len(separator)
-
+    # In entities mode, keep markdown whole so fenced code blocks aren't broken.
+    # Chunking is done later in message_sender on rendered text+entities.
     if config.use_entities_converter:
-        text_chunks = split_plain_text(text, max_chars=max_text)
-    else:
-        text_chunks = split_html_message(text, max_length=max_text)
+        if prefix:
+            return [f"{prefix}{separator}{text}"]
+        return [text]
+
+    # Legacy HTML mode: split first and add page suffixes.
+    # Use conservative max to leave room for markdown expansion at send layer.
+    max_text = 3000 - len(prefix) - len(separator)
+    text_chunks = split_html_message(text, max_length=max_text)
     total = len(text_chunks)
 
     if total == 1:
