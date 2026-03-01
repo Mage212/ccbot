@@ -36,7 +36,7 @@ class TestRenderMarkdownToEntities:
         rendered = render_markdown_to_entities(
             "**bold** _italic_ ~~strike~~ [link](https://example.com) ||spoiler||"
         )
-        types = {str(entity.type.value if hasattr(entity.type, "value") else entity.type) for entity in rendered.entities}
+        types = {str(entity.type) for entity in rendered.entities}
         assert "bold" in types
         assert "italic" in types
         assert "strikethrough" in types
@@ -60,7 +60,7 @@ class TestRenderMarkdownToEntities:
             f"{TranscriptParser.EXPANDABLE_QUOTE_END} after"
         )
         rendered = render_markdown_to_entities(text)
-        types = {str(entity.type.value if hasattr(entity.type, "value") else entity.type) for entity in rendered.entities}
+        types = {str(entity.type) for entity in rendered.entities}
         assert "expandable_blockquote" in types
         assert TranscriptParser.EXPANDABLE_QUOTE_START not in rendered.text
         assert TranscriptParser.EXPANDABLE_QUOTE_END not in rendered.text

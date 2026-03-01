@@ -6,6 +6,7 @@ Markdown -> HTML -> text + MessageEntity.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import re
 
@@ -27,9 +28,7 @@ _HTML_TAG_HINT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-_SUPPORTED_ENTITY_TYPES: set[str] = {
-    item.value if hasattr(item, "value") else str(item) for item in MessageEntity.ALL_TYPES
-}
+_SUPPORTED_ENTITY_TYPES: set[str] = {str(item) for item in MessageEntity.ALL_TYPES}
 
 
 @dataclass(slots=True)
@@ -133,35 +132,41 @@ def _supported_entity_type(raw_type: object) -> str | None:
     return None
 
 
-def _to_message_entities(raw_entities: list[dict[str, object]]) -> list[MessageEntity]:
+def _extract_raw_field(raw: object, key: str) -> object | None:
+    if isinstance(raw, Mapping):
+        return raw.get(key)
+    return getattr(raw, key, None)
+
+
+def _to_message_entities(raw_entities: list[object]) -> list[MessageEntity]:
     result: list[MessageEntity] = []
 
     for raw in raw_entities:
-        etype = _supported_entity_type(raw.get("type"))
+        etype = _supported_entity_type(_extract_raw_field(raw, "type"))
         if etype is None:
             continue
 
-        offset = raw.get("offset")
-        length = raw.get("length")
+        offset = _extract_raw_field(raw, "offset")
+        length = _extract_raw_field(raw, "length")
         if not isinstance(offset, int) or not isinstance(length, int):
             continue
         if offset < 0 or length <= 0:
             continue
+
+        raw_url = _extract_raw_field(raw, "url")
+        raw_language = _extract_raw_field(raw, "language")
+        raw_custom_emoji_id = _extract_raw_field(raw, "custom_emoji_id")
 
         result.append(
             MessageEntity(
                 type=etype,
                 offset=offset,
                 length=length,
-                url=raw.get("url") if isinstance(raw.get("url"), str) else None,
-                language=(
-                    raw.get("language")
-                    if isinstance(raw.get("language"), str)
-                    else None
-                ),
+                url=raw_url if isinstance(raw_url, str) else None,
+                language=raw_language if isinstance(raw_language, str) else None,
                 custom_emoji_id=(
-                    raw.get("custom_emoji_id")
-                    if isinstance(raw.get("custom_emoji_id"), str)
+                    raw_custom_emoji_id
+                    if isinstance(raw_custom_emoji_id, str)
                     else None
                 ),
             )
@@ -204,7 +209,9 @@ def render_markdown_to_entities(markdown_text: str) -> RenderedMessage:
         html_content = _MARKDOWN_RENDERER.render(preprocessed)
     transformed = transform_html(html_content, strict=False)
     text = transformed.text or ""
-    raw_entities = transformed.entities if isinstance(transformed.entities, list) else []
+    raw_entities: list[object] = (
+        list(transformed.entities) if isinstance(transformed.entities, list) else []
+    )
     entities = _to_message_entities(raw_entities)
     return RenderedMessage(text=text, entities=entities)
 
