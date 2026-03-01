@@ -27,9 +27,17 @@ from ..html_converter import convert_markdown
 
 logger = logging.getLogger(__name__)
 
-# HTML tags that indicate text is already converted
-_HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
 _RE_HTML_TAG = re.compile(r"<[^>]+>")
+_HTML_OPENERS = (
+    "<pre",
+    "<code",
+    "<b>",
+    "<i>",
+    "<a ",
+    "<blockquote",
+    "<u>",
+    "<s>",
+)
 
 # Legacy parse mode (used only when entities converter is disabled)
 PARSE_MODE = "HTML"
@@ -42,9 +50,62 @@ def _is_entities_mode() -> bool:
     return config.use_entities_converter
 
 
+class _PartialDeliveryError(Exception):
+    """Raised when at least one chunk is sent but delivery later fails."""
+
+    def __init__(self, first_message: Message | None):
+        super().__init__("partial delivery")
+        self.first_message = first_message
+
+
+def _count_backticks(text: str, start: int) -> int:
+    i = start
+    while i < len(text) and text[i] == "`":
+        i += 1
+    return i - start
+
+
 def _is_already_html(text: str) -> bool:
-    """Check if text already contains Telegram HTML formatting."""
-    return any(tag in text for tag in _HTML_TAGS)
+    """Check if text already contains Telegram HTML formatting.
+
+    Ignores HTML-like literals inside markdown code spans/fenced blocks.
+    """
+    i = 0
+    n = len(text)
+    line_start = True
+    in_fenced_code = False
+    inline_delim_len = 0
+
+    while i < n:
+        ch = text[i]
+
+        if line_start and ch == "`":
+            tick_count = _count_backticks(text, i)
+            if tick_count >= 3:
+                in_fenced_code = not in_fenced_code
+                i += tick_count
+                line_start = False
+                continue
+
+        if not in_fenced_code and ch == "`":
+            tick_count = _count_backticks(text, i)
+            if inline_delim_len == 0:
+                inline_delim_len = tick_count
+            elif inline_delim_len == tick_count:
+                inline_delim_len = 0
+            i += tick_count
+            line_start = False
+            continue
+
+        if not in_fenced_code and inline_delim_len == 0 and ch == "<":
+            lower_tail = text[i : i + 20].lower()
+            if any(lower_tail.startswith(opener) for opener in _HTML_OPENERS):
+                return True
+
+        i += 1
+        line_start = ch == "\n"
+
+    return False
 
 
 def _ensure_html(text: str) -> str:
@@ -95,12 +156,37 @@ async def _send_entities_with_chunks(
 
     first: Message | None = None
     for chunk_text, chunk_entities in chunks:
-        sent = await bot.send_message(
-            chat_id=chat_id,
-            text=chunk_text,
-            entities=chunk_entities or None,
-            **kwargs,
-        )
+        try:
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=chunk_text,
+                entities=chunk_entities or None,
+                **kwargs,
+            )
+        except RetryAfter:
+            raise
+        except Exception as chunk_error:
+            logger.debug(
+                "Entities chunk send failed, falling back to plain chunk: %s",
+                chunk_error,
+            )
+            try:
+                sent = await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk_text,
+                    **kwargs,
+                )
+            except RetryAfter:
+                raise
+            except Exception as fallback_error:
+                if first is not None:
+                    logger.error(
+                        "Chunk fallback failed after partial delivery (chat_id=%d): %s",
+                        chat_id,
+                        fallback_error,
+                    )
+                    raise _PartialDeliveryError(first) from fallback_error
+                raise
         if first is None:
             first = sent
     return first
@@ -117,11 +203,34 @@ async def _reply_entities_with_chunks(
 
     first: Message | None = None
     for chunk_text, chunk_entities in chunks:
-        sent = await message.reply_text(
-            chunk_text,
-            entities=chunk_entities or None,
-            **kwargs,
-        )
+        try:
+            sent = await message.reply_text(
+                chunk_text,
+                entities=chunk_entities or None,
+                **kwargs,
+            )
+        except RetryAfter:
+            raise
+        except Exception as chunk_error:
+            logger.debug(
+                "Entities chunk reply failed, falling back to plain chunk: %s",
+                chunk_error,
+            )
+            try:
+                sent = await message.reply_text(
+                    chunk_text,
+                    **kwargs,
+                )
+            except RetryAfter:
+                raise
+            except Exception as fallback_error:
+                if first is not None:
+                    logger.error(
+                        "Chunk reply fallback failed after partial delivery: %s",
+                        fallback_error,
+                    )
+                    raise _PartialDeliveryError(first) from fallback_error
+                raise
         if first is None:
             first = sent
 
@@ -210,6 +319,8 @@ async def send_with_fallback(
         )
     except RetryAfter:
         raise
+    except _PartialDeliveryError as partial:
+        return partial.first_message
     except Exception as e:
         logger.debug("Formatted send failed, falling back to plain text: %s", e)
         try:
@@ -267,6 +378,10 @@ async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message:
         )
     except RetryAfter:
         raise
+    except _PartialDeliveryError as partial:
+        if partial.first_message is None:
+            raise
+        return partial.first_message
     except Exception:
         try:
             first: Message | None = None
@@ -336,6 +451,8 @@ async def safe_send(
         )
     except RetryAfter:
         raise
+    except _PartialDeliveryError:
+        return
     except Exception:
         try:
             await _send_plain_with_chunks(bot, chat_id, text, **kwargs)

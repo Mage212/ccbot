@@ -11,16 +11,86 @@ import logging
 from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import RetryAfter
 
 from ..config import config
-from ..entities_converter import split_plain_text
-from ..session import session_manager
+from ..entities_converter import render_markdown_to_entities, split_text_and_entities
 from ..html_converter import split_message as split_html_message
+from ..session import session_manager
 from ..transcript_parser import TranscriptParser
 from .callback_data import CB_HISTORY_NEXT, CB_HISTORY_PREV
-from .message_sender import safe_edit, safe_reply, safe_send
+from .message_sender import NO_LINK_PREVIEW, safe_edit, safe_reply, safe_send
 
 logger = logging.getLogger(__name__)
+
+
+async def _send_history_entities_page(
+    target: Any,
+    *,
+    text: str,
+    entities: list[Any],
+    keyboard: InlineKeyboardMarkup | None,
+    edit: bool,
+    bot: Bot | None,
+    user_id: int | None,
+    message_thread_id: int | None,
+) -> None:
+    """Send one pre-rendered entities page for history view."""
+    if edit:
+        try:
+            await target.edit_message_text(
+                text,
+                entities=entities or None,
+                reply_markup=keyboard,
+                link_preview_options=NO_LINK_PREVIEW,
+            )
+        except RetryAfter:
+            raise
+        except Exception:
+            await target.edit_message_text(
+                text,
+                reply_markup=keyboard,
+                link_preview_options=NO_LINK_PREVIEW,
+            )
+        return
+
+    if bot is not None and user_id is not None:
+        kwargs: dict[str, Any] = {
+            "reply_markup": keyboard,
+            "link_preview_options": NO_LINK_PREVIEW,
+        }
+        if message_thread_id is not None:
+            kwargs["message_thread_id"] = message_thread_id
+
+        chat_id = session_manager.resolve_chat_id(user_id, message_thread_id)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                entities=entities or None,
+                **kwargs,
+            )
+        except RetryAfter:
+            raise
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        return
+
+    try:
+        await target.reply_text(
+            text,
+            entities=entities or None,
+            reply_markup=keyboard,
+            link_preview_options=NO_LINK_PREVIEW,
+        )
+    except RetryAfter:
+        raise
+    except Exception:
+        await target.reply_text(
+            text,
+            reply_markup=keyboard,
+            link_preview_options=NO_LINK_PREVIEW,
+        )
 
 
 def _build_history_keyboard(
@@ -197,25 +267,52 @@ async def send_history(
             else:
                 lines.append(msg_text)
         full_text = "\n\n".join(lines)
+        entities_payload: list[Any] | None = None
         if config.use_entities_converter:
-            pages = split_plain_text(full_text, max_chars=4096)
+            rendered = render_markdown_to_entities(full_text)
+            pages_with_entities = split_text_and_entities(
+                rendered.text,
+                rendered.entities,
+                max_chars=4096,
+            )
+            # Default to last page (newest messages) for both history and unread
+            if offset < 0:
+                offset = len(pages_with_entities) - 1
+            page_index = max(0, min(offset, len(pages_with_entities) - 1))
+            text, entities_payload = pages_with_entities[page_index]
+            total_pages = len(pages_with_entities)
         else:
             pages = split_html_message(full_text, max_length=4096)
+            # Default to last page (newest messages) for both history and unread
+            if offset < 0:
+                offset = len(pages) - 1
+            page_index = max(0, min(offset, len(pages) - 1))
+            text = pages[page_index]
+            total_pages = len(pages)
 
-        # Default to last page (newest messages) for both history and unread
-        if offset < 0:
-            offset = len(pages) - 1
-        page_index = max(0, min(offset, len(pages) - 1))
-        text = pages[page_index]
         keyboard = _build_history_keyboard(
-            window_id, page_index, len(pages), start_byte, end_byte
+            window_id, page_index, total_pages, start_byte, end_byte
         )
         logger.debug(
             "send_history result: %d messages, %d pages, serving page %d",
             total,
-            len(pages),
+            total_pages,
             page_index,
         )
+        if config.use_entities_converter and entities_payload is not None:
+            await _send_history_entities_page(
+                target,
+                text=text,
+                entities=entities_payload,
+                keyboard=keyboard,
+                edit=edit,
+                bot=bot,
+                user_id=user_id,
+                message_thread_id=message_thread_id,
+            )
+            if is_unread and user_id is not None and end_byte > 0:
+                session_manager.update_user_window_offset(user_id, window_id, end_byte)
+            return
 
     if edit:
         await safe_edit(target, text, reply_markup=keyboard)
