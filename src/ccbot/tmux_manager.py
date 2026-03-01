@@ -39,6 +39,10 @@ class TmuxWindow:
 class TmuxManager:
     """Manages tmux windows for Claude Code sessions."""
 
+    DEFAULT_WINDOW_WIDTH = 200
+    DEFAULT_WINDOW_HEIGHT = 50
+    DEFAULT_CAPTURE_SCROLLBACK_LINES = 2000
+
     def __init__(self, session_name: str | None = None):
         """Initialize tmux manager.
 
@@ -169,7 +173,7 @@ class TmuxManager:
         return None
 
     async def capture_pane(self, window_id: str, with_ansi: bool = False) -> str | None:
-        """Capture the visible text content of a window's active pane.
+        """Capture pane text for a window.
 
         Args:
             window_id: The window ID to capture
@@ -178,31 +182,37 @@ class TmuxManager:
         Returns:
             The captured text, or None on failure.
         """
+        # Use tmux capture-pane for both ANSI and plain captures.
+        # For plain text, include recent scrollback to reduce missed content
+        # when pane viewport is smaller than the active output region.
+        args = ["tmux", "capture-pane"]
         if with_ansi:
-            # Use async subprocess to call tmux capture-pane -e for ANSI colors
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "tmux",
-                    "capture-pane",
-                    "-e",
-                    "-p",
-                    "-t",
-                    window_id,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await proc.communicate()
-                if proc.returncode == 0:
-                    return stdout.decode("utf-8")
-                logger.error(
-                    f"Failed to capture pane {window_id}: {stderr.decode('utf-8')}"
-                )
-                return None
-            except Exception as e:
-                logger.error(f"Unexpected error capturing pane {window_id}: {e}")
-                return None
+            args.append("-e")
+        else:
+            args.extend(["-S", f"-{self.DEFAULT_CAPTURE_SCROLLBACK_LINES}"])
+        args.extend(["-p", "-t", window_id])
 
-        # Original implementation for plain text - wrap in thread
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                return stdout.decode("utf-8")
+            logger.error(
+                "Failed to capture pane %s: %s",
+                window_id,
+                stderr.decode("utf-8"),
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error capturing pane {window_id}: {e}")
+
+        # Fallback for plain-text path.
+        if with_ansi:
+            return None
+
         def _sync_capture() -> str | None:
             session = self.get_session()
             if not session:
@@ -387,6 +397,29 @@ class TmuxManager:
                 )
 
                 wid = window.window_id or ""
+                target = wid or f"{self.session_name}:{final_window_name}"
+
+                # Keep this window at a stable manual size to reduce TUI wrapping
+                # variance and improve parser reliability.
+                try:
+                    self.server.cmd(
+                        "set-option",
+                        "-t",
+                        self.session_name,
+                        "window-size",
+                        "manual",
+                    )
+                    self.server.cmd(
+                        "resize-window",
+                        "-t",
+                        target,
+                        "-x",
+                        str(self.DEFAULT_WINDOW_WIDTH),
+                        "-y",
+                        str(self.DEFAULT_WINDOW_HEIGHT),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to apply window size for %s: %s", target, e)
 
                 # Start Claude Code if requested
                 if start_claude:
@@ -396,10 +429,12 @@ class TmuxManager:
                         pane.send_keys(launch_cmd, enter=True)
 
                 logger.info(
-                    "Created window '%s' (id=%s) at %s",
+                    "Created window '%s' (id=%s) at %s (%sx%s)",
                     final_window_name,
                     wid,
                     path,
+                    self.DEFAULT_WINDOW_WIDTH,
+                    self.DEFAULT_WINDOW_HEIGHT,
                 )
                 return (
                     True,
