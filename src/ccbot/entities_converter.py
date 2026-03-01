@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import re
 
 from markdown_it import MarkdownIt
 from sulguk import transform_html
@@ -23,10 +22,6 @@ _MARKDOWN_RENDERER = MarkdownIt("commonmark", {"breaks": True}).enable("striketh
 
 _SPOILER_OPEN = "<tg-spoiler>"
 _SPOILER_CLOSE = "</tg-spoiler>"
-_HTML_TAG_HINT_RE = re.compile(
-    r"<(?:pre|code|b|i|a|blockquote|u|s|tg-spoiler|span|strong|em)\b",
-    flags=re.IGNORECASE,
-)
 
 _SUPPORTED_ENTITY_TYPES: set[str] = {str(item) for item in MessageEntity.ALL_TYPES}
 
@@ -201,12 +196,8 @@ def render_markdown_to_entities(markdown_text: str) -> RenderedMessage:
     if not markdown_text:
         return RenderedMessage(text="", entities=[])
 
-    source_is_html = _HTML_TAG_HINT_RE.search(markdown_text) is not None
     preprocessed = _preprocess_markdown(markdown_text)
-    if source_is_html:
-        html_content = preprocessed
-    else:
-        html_content = _MARKDOWN_RENDERER.render(preprocessed)
+    html_content = _MARKDOWN_RENDERER.render(preprocessed)
     transformed = transform_html(html_content, strict=False)
     text = transformed.text or ""
     raw_entities: list[object] = (

@@ -78,6 +78,14 @@ print(code)
         assert "code =" in rendered.text
         assert any(entity.type == MessageEntity.PRE for entity in rendered.entities)
 
+    def test_fenced_code_with_html_does_not_disable_markdown(self) -> None:
+        rendered = render_markdown_to_entities(
+            "## Заголовок\n\n```python\nreturn '<div class=\"x\">'</div>'\n```"
+        )
+        types = {str(entity.type) for entity in rendered.entities}
+        assert "bold" in types
+        assert "pre" in types
+
     def test_bracket_heavy_text_converts_without_hang(self) -> None:
         text = "[" * 6000 + "x" + "]" * 6000
         started = time.perf_counter()
