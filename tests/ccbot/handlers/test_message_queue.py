@@ -8,8 +8,10 @@ from telegram.error import BadRequest
 
 from ccbot.handlers.message_queue import (
     MessageTask,
+    _convert_status_to_content,
     _interactive_probe_pending,
     _interactive_render_state,
+    _status_msg_info,
     _process_content_task,
     _process_pane_probe_task,
     _tool_msg_ids,
@@ -37,10 +39,12 @@ def _clear_queue_state():
     _tool_msg_ids.clear()
     _interactive_render_state.clear()
     _interactive_probe_pending.clear()
+    _status_msg_info.clear()
     yield
     _tool_msg_ids.clear()
     _interactive_render_state.clear()
     _interactive_probe_pending.clear()
+    _status_msg_info.clear()
 
 
 @pytest.fixture
@@ -242,6 +246,30 @@ class TestToolUseInteractiveOrdering:
             mock_images.assert_called_once()
             mock_status.assert_called_once()
             assert ("tool_dup_guard", 1, 42) not in _tool_msg_ids
+
+    @pytest.mark.asyncio
+    async def test_status_to_content_edit_works_in_entities_mode(
+        self, mock_bot: AsyncMock, monkeypatch
+    ):
+        from ccbot.handlers import message_sender
+
+        monkeypatch.setattr(message_sender.config, "use_entities_converter", True)
+        _status_msg_info[(1, 42)] = (555, "@5", "old")
+
+        with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+            mock_sm.resolve_chat_id.return_value = 100
+            msg_id = await _convert_status_to_content(
+                mock_bot,
+                user_id=1,
+                thread_id_or_0=42,
+                window_id="@5",
+                content_text="**bold**",
+            )
+
+        assert msg_id == 555
+        kwargs = mock_bot.edit_message_text.call_args.kwargs
+        assert kwargs.get("parse_mode") is None
+        assert "entities" in kwargs
 
 
 @pytest.mark.usefixtures("_clear_queue_state", "_clear_interactive_state")

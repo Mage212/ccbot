@@ -91,9 +91,10 @@ ALLOWED_USERS=your_telegram_user_id
 | `CLAUDE_COMMAND` | `claude` | Команда запуска в новых окнах |
 | `MONITOR_POLL_INTERVAL` | `2.0` | Интервал опроса в секундах |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Показывать скрытые (dot) директории в браузере каталогов |
+| `CCBOT_USE_ENTITIES_CONVERTER` | `false` | Включить пилотный entities-пайплайн (`markdown-it-py` + `sulguk`) |
 
-Форматирование сообщений всегда HTML через `chatgpt-md-converter` (`chatgpt_md_converter`).
-Переключателя формата на MarkdownV2 во время выполнения нет.
+По умолчанию форматирование сообщений — HTML через `chatgpt-md-converter` (`chatgpt_md_converter`).
+Если задать `CCBOT_USE_ENTITIES_CONVERTER=true`, включается пилотный режим `text + entities` без `parse_mode`.
 
 > Если бот запущен на VPS без интерактивного терминала для подтверждений, можно использовать:
 >
@@ -207,8 +208,8 @@ I'll look into the login bug...
 Уведомления отправляются в topic, привязанный к окну сессии.
 
 Примечание по форматированию:
-- Telegram-сообщения рендерятся с parse mode `HTML` через `chatgpt-md-converter`
-- Длинные сообщения делятся с учётом HTML-тегов, чтобы сохранять код-блоки и форматирование
+- Режим по умолчанию: Telegram-сообщения рендерятся с parse mode `HTML` через `chatgpt-md-converter`
+- Пилотный режим (`CCBOT_USE_ENTITIES_CONVERTER=true`): сообщения отправляются как `text + entities` без `parse_mode`
 
 ## Запуск Claude Code в tmux
 
@@ -264,6 +265,7 @@ src/ccbot/
 ├── transcript_parser.py   # Парсинг JSONL-транскриптов Claude Code
 ├── terminal_parser.py     # Парсинг terminal pane (interactive UI + status line)
 ├── html_converter.py      # Markdown -> Telegram HTML + HTML-aware splitting
+├── entities_converter.py  # Markdown/HTML -> Telegram text + entities + безопасный сплит
 ├── screenshot.py          # Terminal text -> PNG с поддержкой ANSI-цветов
 ├── utils.py               # Общие утилиты (atomic JSON writes, JSONL helpers)
 ├── tmux_manager.py        # Управление tmux-окнами (list, create, send keys, kill)

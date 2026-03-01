@@ -90,9 +90,10 @@ ALLOWED_USERS=your_telegram_user_id
 | `CLAUDE_COMMAND` | `claude` | 新窗口中运行的命令 |
 | `MONITOR_POLL_INTERVAL` | `2.0` | 轮询间隔（秒） |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | 在目录浏览器中显示隐藏（点开头）目录 |
+| `CCBOT_USE_ENTITIES_CONVERTER` | `false` | 启用实验性 entities 管线（`markdown-it-py` + `sulguk`） |
 
-消息格式化目前固定为 HTML，使用 `chatgpt-md-converter`（`chatgpt_md_converter` 包）。
-不再提供运行时切换到 MarkdownV2 的开关。
+默认消息格式化使用 HTML（`chatgpt-md-converter` / `chatgpt_md_converter`）。
+设置 `CCBOT_USE_ENTITIES_CONVERTER=true` 可启用实验性 `text + entities` 模式（不使用 `parse_mode`）。
 
 > 如果在 VPS 上运行且没有交互终端来批准权限，可以考虑：
 > ```
@@ -204,8 +205,8 @@ uv run ccbot
 通知发送到绑定了该会话窗口的话题中。
 
 格式说明：
-- Telegram 消息使用 `HTML` parse mode
-- 通过 `chatgpt-md-converter` 做 Markdown→HTML 转换与 HTML 标签感知拆分，保证长代码块拆分稳定
+- 默认模式：Telegram 消息使用 `HTML` parse mode（`chatgpt-md-converter`）
+- 实验模式（`CCBOT_USE_ENTITIES_CONVERTER=true`）：消息以 `text + entities` 发送（不使用 `parse_mode`）
 
 ## 在 tmux 中运行 Claude Code
 
@@ -269,6 +270,7 @@ src/ccbot/
 ├── transcript_parser.py   # Claude Code JSONL 对话记录解析
 ├── terminal_parser.py     # 终端面板解析（交互式 UI + 状态行）
 ├── html_converter.py      # Markdown → Telegram HTML 转换 + HTML 感知拆分
+├── entities_converter.py  # Markdown/HTML → Telegram text + entities 转换与安全拆分
 ├── screenshot.py          # 终端文字 → PNG 图片（支持 ANSI 颜色）
 ├── utils.py               # 通用工具（原子 JSON 写入、JSONL 辅助函数）
 ├── tmux_manager.py        # tmux 窗口管理（列出、创建、发送按键、终止）

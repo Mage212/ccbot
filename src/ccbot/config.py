@@ -90,14 +90,20 @@ class Config:
             os.getenv("CCBOT_SHOW_HIDDEN_DIRS", "").lower() == "true"
         )
 
+        # Use entities-based converter (Markdown -> HTML -> entities) for Telegram output
+        self.use_entities_converter = (
+            os.getenv("CCBOT_USE_ENTITIES_CONVERTER", "").lower() == "true"
+        )
+
         logger.debug(
             "Config initialized: dir=%s, token=%s..., allowed_users=%d, "
-            "tmux_session=%s, claude_projects_path=%s",
+            "tmux_session=%s, claude_projects_path=%s, use_entities_converter=%s",
             self.config_dir,
             self.telegram_bot_token[:8],
             len(self.allowed_users),
             self.tmux_session_name,
             self.claude_projects_path,
+            self.use_entities_converter,
         )
 
     def is_user_allowed(self, user_id: int) -> bool:

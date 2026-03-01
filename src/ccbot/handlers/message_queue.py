@@ -28,7 +28,6 @@ from telegram import Bot
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, RetryAfter
 
-from ..html_converter import convert_markdown, strip_sentinels
 from ..session import session_manager
 from ..terminal_parser import extract_active_interactive_content, parse_status_line
 from ..tmux_manager import tmux_manager
@@ -38,24 +37,14 @@ from .interactive_ui import (
     set_interactive_mode,
     set_interactive_msg_id,
 )
-from .message_sender import NO_LINK_PREVIEW, PARSE_MODE, send_photo, send_with_fallback
+from .message_sender import (
+    NO_LINK_PREVIEW,
+    edit_with_fallback,
+    send_photo,
+    send_with_fallback,
+)
 
 logger = logging.getLogger(__name__)
-
-# HTML tags that indicate text is already converted
-_HTML_TAGS = ("<pre>", "<code>", "<b>", "<i>", "<a ", "<blockquote", "<u>", "<s>")
-
-def _is_already_html(text: str) -> bool:
-    """Check if text already contains Telegram HTML formatting."""
-    return any(tag in text for tag in _HTML_TAGS)
-
-
-def _ensure_html(text: str) -> str:
-    """Convert to HTML only if not already converted."""
-    if _is_already_html(text):
-        return text
-    return convert_markdown(text)
-
 
 # Merge limit for content messages
 MERGE_MAX_LENGTH = 3800  # Leave room for markdown conversion overhead
@@ -636,11 +625,12 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             # Join all parts for editing (merged content goes together)
             full_text = "\n\n".join(task.parts)
             try:
-                await bot.edit_message_text(
+                await edit_with_fallback(
+                    bot,
                     chat_id=chat_id,
                     message_id=edit_msg_id,
-                    text=_ensure_html(full_text),
-                    parse_mode=PARSE_MODE,
+                    text=full_text,
+                    propagate_not_modified=True,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
                 await _send_task_images(bot, chat_id, task)
@@ -654,41 +644,11 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                     await _send_task_images(bot, chat_id, task)
                     await _check_and_send_status(bot, user_id, wid, task.thread_id)
                     return
-                try:
-                    # Fallback: plain text with sentinels stripped
-                    plain_text = strip_sentinels(task.text or full_text)
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=edit_msg_id,
-                        text=plain_text,
-                        link_preview_options=NO_LINK_PREVIEW,
-                    )
-                    await _send_task_images(bot, chat_id, task)
-                    await _check_and_send_status(bot, user_id, wid, task.thread_id)
-                    return
-                except RetryAfter:
-                    raise
-                except Exception:
-                    logger.debug(f"Failed to edit tool msg {edit_msg_id}, sending new")
-                    # Fall through to send as new message
+                logger.debug(f"Failed to edit tool msg {edit_msg_id}, sending new")
+                # Fall through to send as new message
             except Exception:
-                try:
-                    # Fallback: plain text with sentinels stripped
-                    plain_text = strip_sentinels(task.text or full_text)
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=edit_msg_id,
-                        text=plain_text,
-                        link_preview_options=NO_LINK_PREVIEW,
-                    )
-                    await _send_task_images(bot, chat_id, task)
-                    await _check_and_send_status(bot, user_id, wid, task.thread_id)
-                    return
-                except RetryAfter:
-                    raise
-                except Exception:
-                    logger.debug(f"Failed to edit tool msg {edit_msg_id}, sending new")
-                    # Fall through to send as new message
+                logger.debug(f"Failed to edit tool msg {edit_msg_id}, sending new")
+                # Fall through to send as new message
 
     # 2. Send content messages, converting status message to first content part
     first_part = True
@@ -778,33 +738,20 @@ async def _convert_status_to_content(
 
     # Edit status message to show content
     try:
-        await bot.edit_message_text(
+        await edit_with_fallback(
+            bot,
             chat_id=chat_id,
             message_id=msg_id,
-            text=_ensure_html(content_text),
-            parse_mode=PARSE_MODE,
+            text=content_text,
             link_preview_options=NO_LINK_PREVIEW,
         )
         return msg_id
     except RetryAfter:
         raise
     except Exception:
-        try:
-            # Fallback to plain text with sentinels stripped
-            plain = strip_sentinels(content_text)
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=plain,
-                link_preview_options=NO_LINK_PREVIEW,
-            )
-            return msg_id
-        except RetryAfter:
-            raise
-        except Exception as e:
-            logger.debug(f"Failed to convert status to content: {e}")
-            # Message might be deleted or too old, caller will send new message
-            return None
+        logger.debug("Failed to convert status to content")
+        # Message might be deleted or too old, caller will send new message
+        return None
 
 
 async def _process_status_update_task(
@@ -847,31 +794,20 @@ async def _process_status_update_task(
                 except Exception:
                     pass
             try:
-                await bot.edit_message_text(
+                await edit_with_fallback(
+                    bot,
                     chat_id=chat_id,
                     message_id=msg_id,
-                    text=_ensure_html(status_text),
-                    parse_mode=PARSE_MODE,
+                    text=status_text,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
             except RetryAfter:
                 raise
-            except Exception:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=status_text,
-                        link_preview_options=NO_LINK_PREVIEW,
-                    )
-                    _status_msg_info[skey] = (msg_id, wid, status_text)
-                except RetryAfter:
-                    raise
-                except Exception as e:
-                    logger.debug(f"Failed to edit status message: {e}")
-                    _status_msg_info.pop(skey, None)
-                    await _do_send_status_message(bot, user_id, tid, wid, status_text)
+            except Exception as e:
+                logger.debug(f"Failed to edit status message: {e}")
+                _status_msg_info.pop(skey, None)
+                await _do_send_status_message(bot, user_id, tid, wid, status_text)
     else:
         # No existing status message, send new
         await _do_send_status_message(bot, user_id, tid, wid, status_text)

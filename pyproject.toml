@@ -12,6 +12,8 @@ dependencies = [
     "Pillow>=10.0.0",
     "aiofiles>=24.0.0",
     "chatgpt-md-converter>=0.3.12",
+    "markdown-it-py>=3.0.0",
+    "sulguk>=0.11.1",
 ]
 
 [project.scripts]

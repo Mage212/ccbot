@@ -3,8 +3,8 @@
 Drop-in replacement for markdown_v2.py using HTML output format instead of MarkdownV2.
 Provides convert_markdown() and split_message() functions with compatible signatures.
 
-When CCBOT_USE_HTML_CONVERTER=true, the bot uses HTML parse mode which allows
-cleaner formatting and more reliable tag-aware message splitting.
+Legacy converter used by the default output mode (HTML parse mode).
+The entities-based converter is enabled separately via CCBOT_USE_ENTITIES_CONVERTER.
 """
 
 import logging

@@ -103,12 +103,12 @@ from .handlers.message_queue import (
 )
 from .handlers.message_sender import (
     NO_LINK_PREVIEW,
+    edit_with_fallback,
     safe_edit,
     safe_reply,
     safe_send,
     send_with_fallback,
 )
-from .html_converter import convert_markdown
 from .handlers.response_builder import build_response_parts
 from .handlers.status_polling import status_poll_loop
 from .screenshot import text_to_image
@@ -683,11 +683,11 @@ async def _capture_bash_output(
             else:
                 # Subsequent captures — edit in place
                 try:
-                    await bot.edit_message_text(
+                    await edit_with_fallback(
+                        bot,
                         chat_id=chat_id,
                         message_id=msg_id,
-                        text=convert_markdown(output),
-                        parse_mode="MarkdownV2",
+                        text=output,
                         link_preview_options=NO_LINK_PREVIEW,
                     )
                 except Exception:

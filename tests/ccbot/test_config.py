@@ -33,6 +33,15 @@ class TestConfigValid:
         cfg = Config()
         assert cfg.monitor_poll_interval == 5.0
 
+    def test_entities_converter_default_disabled(self):
+        cfg = Config()
+        assert cfg.use_entities_converter is False
+
+    def test_entities_converter_enabled(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_USE_ENTITIES_CONVERTER", "true")
+        cfg = Config()
+        assert cfg.use_entities_converter is True
+
     def test_is_user_allowed_true(self):
         cfg = Config()
         assert cfg.is_user_allowed(12345) is True
