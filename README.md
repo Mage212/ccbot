@@ -148,6 +148,7 @@ uv run ccbot
 | `/history`    | Message history for this topic  |
 | `/screenshot` | Capture terminal screenshot     |
 | `/esc`        | Send Escape to interrupt Claude |
+| `/kill`       | Kill session and unbind topic   |
 
 **Claude Code commands (forwarded via tmux):**
 
@@ -179,7 +180,8 @@ Once a topic is bound to a session, just send text in that topic — it gets for
 
 **Killing a session:**
 
-Close (or delete) the topic in Telegram. The associated tmux window is automatically killed and the binding is removed.
+Use `/kill` in the topic to kill its bound tmux window and unbind the topic.  
+You can also close (or delete) the topic in Telegram — this also auto-kills the associated tmux window and removes the binding.
 
 ### Message History
 
